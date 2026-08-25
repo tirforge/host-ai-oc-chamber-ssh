@@ -5,15 +5,10 @@ import types
 
 
 def load_startup():
-    spec = importlib.util.spec_from_file_location("startup_mod", "scripts/startup.py")
-    mod = importlib.util.module_from_spec(spec)
     # prevent top-level exit by mocking CF_TOKEN check: set dummy env
     os.environ["CF_TOKEN"] = "dummy"
     os.environ["CF_DOMAIN"] = "example.com"
-    # import without executing main
-    # we load source and exec only function defs
     src = open("scripts/startup.py").read()
-    # extract get_secret function only
     exec_globals = {}
     exec(compile(src.split("def main():")[0], "scripts/startup.py", "exec"), exec_globals)
     return exec_globals["get_secret"]
@@ -77,7 +72,12 @@ def test_model_default_logic():
 
 
 def test_startup_import_main():
-    # ensure main exists and is callable
-    import scripts.startup as s
-    assert hasattr(s, "main")
-    assert callable(s.main)
+    # ensure main exists and is callable without installing package
+    spec = importlib.util.spec_from_file_location("startup_main", "scripts/startup.py")
+    mod = importlib.util.module_from_spec(spec)
+    src = open("scripts/startup.py").read()
+    globs = {}
+    # exec whole file - top-level now only defines functions, main not auto-called
+    exec(compile(src, "scripts/startup.py", "exec"), globs)
+    assert "main" in globs
+    assert callable(globs["main"])

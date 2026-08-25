@@ -1,6 +1,5 @@
 import json
 import yaml
-import os
 
 
 def test_cloudflared_wiring():
