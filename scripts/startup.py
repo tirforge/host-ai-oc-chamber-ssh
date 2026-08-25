@@ -107,6 +107,10 @@ def main():
     if not MODEL or not MODEL.strip():
         MODEL = MODEL_DEFAULT
     MODEL = MODEL.strip()
+    # map old alias to valid HF repo (fixes Kaggle qwen/qwen3-coder-30b-a3b not found)
+    if MODEL in ["qwen/qwen3-coder-30b-a3b", "qwen3-coder-30b-a3b"]:
+        print(f"Mapping alias {MODEL} -> lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M", flush=True)
+        MODEL = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
     TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
 
     if not DOMAIN:
@@ -123,12 +127,14 @@ def main():
     os.environ["CF_API_TOKEN"] = CF_TOKEN if CF_TOKEN else ""
     if SSH_PASSWORD and SSH_PASSWORD.strip():
         os.environ["SSH_PASSWORD"] = SSH_PASSWORD.strip()
-        # configure SSH password (Kaggle/local) - sets for current user + root
+        # configure SSH password - only chpasswd (passwd --stdin not on Debian), only for existing users
         ssh_user = os.getenv("USER") or "root"
-        for u in list({ssh_user, "root", "kaggle", "jupyter"}):
-            # chpasswd is most portable, fallback to passwd --stdin
-            run(f'echo "{u}:{SSH_PASSWORD.strip()}" | chpasswd 2>&1 || echo "{SSH_PASSWORD.strip()}" | passwd --stdin {u} 2>&1 || true')
-        print(f"SSH password configured for {ssh_user}/root (from SSH_PASSWORD secret)", flush=True)
+        for u in list({ssh_user, "root"}):
+            if run(f"id -u {u} >/dev/null 2>&1"):
+                run(f'echo "{u}:{SSH_PASSWORD.strip()}" | chpasswd 2>&1 || true')
+                print(f"SSH password set for {u}", flush=True)
+            else:
+                print(f"User {u} not found, skipping chpasswd", flush=True)
     else:
         print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
 

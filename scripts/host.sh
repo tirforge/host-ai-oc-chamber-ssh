@@ -12,17 +12,24 @@ MODEL=${MODEL:-lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M}
 # also allow positional 3rd arg as model
 if [ -n "$3" ]; then MODEL="$3"; fi
 
-# SSH password from env/Kaggle (SSH_PASSWORD or SSH_PASS) - sets for current + root
+# SSH password from env/Kaggle (SSH_PASSWORD or SSH_PASS) - only chpasswd, only existing users
 if [ -n "${SSH_PASSWORD:-}" ]; then
   echo "Configuring SSH password from SSH_PASSWORD env..."
   _ssh_user="${USER:-root}"
-  for _u in "$_ssh_user" root kaggle jupyter; do
-    echo "$_u:$SSH_PASSWORD" | chpasswd 2>&1 || echo "$SSH_PASSWORD" | passwd --stdin "$_u" 2>&1 || true
+  for _u in "$_ssh_user" root; do
+    if id -u "$_u" >/dev/null 2>&1; then
+      echo "$_u:$SSH_PASSWORD" | chpasswd 2>&1 || true
+      echo "SSH password set for $_u"
+    fi
   done
-  echo "SSH password set for $_ssh_user/root"
 elif [ -n "${SSH_PASS:-}" ]; then
   echo "Configuring SSH password from SSH_PASS..."
-  for _u in "${USER:-root}" root; do echo "$_u:$SSH_PASS" | chpasswd 2>&1 || true; done
+  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then echo "$_u:$SSH_PASS" | chpasswd 2>&1 || true; echo "SSH password set for $_u"; fi; done
+fi
+# Map old alias to valid HF repo
+if [ "$MODEL" = "qwen/qwen3-coder-30b-a3b" ] || [ "$MODEL" = "qwen3-coder-30b-a3b" ]; then
+  echo "Mapping alias $MODEL -> lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
+  MODEL="lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
 fi
 
 echo "Pulling model $MODEL (default: lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M) if missing..."
