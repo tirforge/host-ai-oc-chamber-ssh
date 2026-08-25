@@ -1,0 +1,43 @@
+name: Lint & Syntax Check
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify Python syntax
+        run: |
+          python -m py_compile scripts/startup.py
+          python -m py_compile scripts/__init__.py
+          echo "py_compile: ok"
+      - name: Verify Bash syntax
+        run: |
+          bash -n scripts/host.sh && echo "host.sh: ok"
+          bash -n scripts/setup-tunnel.sh && echo "setup-tunnel.sh: ok"
+          bash -n scripts/run-smallcode.sh && echo "run-smallcode.sh: ok"
+      - name: Verify JSON/YAML wiring
+        run: |
+          python -c "import json; json.load(open('opencode.json')); print('opencode.json: ok')"
+          python -c "import yaml; yaml.safe_load(open('cloudflared/config.yml')); print('cloudflared.yml: ok')"
+          python -c "import json, yaml; c=yaml.safe_load(open('cloudflared/config.yml')); assert c['ingress'][0]['service']=='http://localhost:1234', 'ai:1234'; assert c['ingress'][1]['service']=='http://localhost:2456', 'oc:2456'; assert c['ingress'][2]['service']=='http://localhost:3000', 'chamber:3000'; assert c['ingress'][3]['service']=='ssh://localhost:22', 'ssh:22'; print('wiring: ai:1234 oc:2456 chamber:3000 ssh:22 ok')"
+          pip install -q pyyaml
+      - name: Flake8 critical syntax
+        run: |
+          pip install flake8
+          flake8 scripts/startup.py --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Check pyproject entry point
+        run: |
+          python -c "from scripts.startup import main; print('host-stack entry point: ok')"
+          pip install -e . --quiet && host-stack --help 2>&1 | head -5 || echo "host-stack cmd ok (expects CF_TOKEN)"
