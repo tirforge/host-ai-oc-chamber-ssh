@@ -1,0 +1,12 @@
+tunnel: t4host
+credentials-file: /root/.cloudflared/<TUNNEL_ID>.json
+ingress:
+  - hostname: ai.yourdomain.com
+    service: http://localhost:1234
+  - hostname: oc.yourdomain.com
+    service: http://localhost:4096
+  - hostname: chamber.yourdomain.com
+    service: http://localhost:3000
+  - hostname: ssh.yourdomain.com
+    service: ssh://localhost:22
+  - service: http_status:404
