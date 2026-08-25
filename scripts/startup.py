@@ -166,7 +166,8 @@ def main():
                 os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
     ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"; lms daemon up || true")
     ensure_tool("cloudflared", "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared || true")
-    ensure_tool("opencode", "curl -fsSL https://opencode.ai/install | bash; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
+    # opencode: npm -g is main, script as fallback (as you requested)
+    ensure_tool("opencode", "npm install -g opencode-ai || npm i -g opencode || bun install -g opencode-ai || curl -fsSL https://opencode.ai/install | bash || true; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
     # openchamber needs Node 22+ - ensure Node 22 is active before install (use nodesource for Kaggle)
     if not shutil.which("openchamber"):
         has_node22 = shutil.which("node") and run("node --version | grep -q 'v22\\|v23\\|v24'")
