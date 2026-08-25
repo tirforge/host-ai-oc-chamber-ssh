@@ -6,7 +6,7 @@ Fork of https://github.com/openchamber/openchamber extended for self-hosting.
 
 ## Subdomains (one tunnel)
 - `ai.yourdomain.com` -> LM Studio `http://localhost:1234` (+ `/v1`)
-- `oc.yourdomain.com` -> Opencode Web `http://localhost:4096`
+- `oc.yourdomain.com` -> Opencode Web `http://localhost:2456`
 - `chamber.yourdomain.com` -> OpenChamber `http://localhost:3000`
 - `ssh.yourdomain.com` -> SSH `ssh://localhost:22`
 

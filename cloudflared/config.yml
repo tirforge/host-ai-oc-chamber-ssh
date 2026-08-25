@@ -4,7 +4,7 @@ ingress:
   - hostname: ai.yourdomain.com
     service: http://localhost:1234
   - hostname: oc.yourdomain.com
-    service: http://localhost:4096
+    service: http://localhost:2456
   - hostname: chamber.yourdomain.com
     service: http://localhost:3000
   - hostname: ssh.yourdomain.com
