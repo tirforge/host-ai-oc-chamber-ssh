@@ -2,6 +2,9 @@
 set -e
 # Host stack: LM Studio (1234) + Opencode Web (2456) + OpenChamber (3000) + cloudflared (4 subdomains) + SSH
 # Non-Docker, Python/host-receiver
+# Export PATH before any checks (fixes lms/opencode not found)
+export PATH="$HOME/.lmstudio/bin:$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+for _p in "$HOME/.local/share/fnm/aliases/default/bin" $HOME/.nvm/versions/node/v22*/bin; do [ -d "$_p" ] && export PATH="$_p:$PATH"; done
 
 DOMAIN=${1:-yourdomain.com}
 TUNNEL=${2:-t4host}

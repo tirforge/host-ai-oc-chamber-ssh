@@ -58,13 +58,23 @@ def ensure_tool(name, install_cmd):
         return True
     print(f"{name} not found, installing...", flush=True)
     run(install_cmd)
-    # also try common paths
-    for p in [os.path.expanduser("~/.local/bin"), "/usr/local/bin", os.path.expanduser("~/.lmstudio/bin")]:
+    # also try common paths (must include opencode)
+    for p in [os.path.expanduser("~/.lmstudio/bin"), os.path.expanduser("~/.opencode/bin"), os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
         if p not in os.environ.get("PATH", ""):
             os.environ["PATH"] = f"{p}:{os.environ.get('PATH','')}"
     return shutil.which(name) is not None
 
 def main():
+    # Export PATH before any which checks (fixes lms/opencode not found after install)
+    for p in [os.path.expanduser("~/.lmstudio/bin"), os.path.expanduser("~/.opencode/bin"), os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
+        if p not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{p}:{os.environ.get('PATH','')}"
+    # also add fnm/nvm node 22 bin if present
+    import glob
+    for pat in [os.path.expanduser("~/.local/share/fnm/aliases/default/bin"), os.path.expanduser("~/.nvm/versions/node/v22*/bin")]:
+        for p in glob.glob(pat):
+            if p not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{p}:{os.environ.get('PATH','')}"
     # Kaggle explicit format you requested - you can tune these 5 via Kaggle Secrets UI
     # This populates env so get_secret() picks them up
     try:
