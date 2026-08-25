@@ -59,6 +59,17 @@ def grep_url(name, pattern=r"https://[a-z0-9-]+\.trycloudflare\.com"):
     except Exception:
         return None
 
+def wait_http(url, tries=12, delay=5, name=""):
+    for i in range(tries):
+        r = subprocess.run(f"curl -s -m 4 -o /dev/null -w '%{{http_code}}' {url}", shell=True, capture_output=True, text=True)
+        code = r.stdout.strip()
+        if code.startswith("2"):
+            print(f"{name or url}: UP ({code}) after {(i+1)*delay}s", flush=True)
+            return True
+        time.sleep(delay)
+    print(f"{name or url}: DOWN after {tries*delay}s", flush=True)
+    return False
+
 def run(cmd):
     print(f"$ {cmd}", flush=True)
     r = subprocess.run(cmd, shell=True)
@@ -332,11 +343,14 @@ def main():
     tunnels = []
     if shutil.which("lms"):
         run_bg("lms server start --port 1234 --cors", "lmstudio:1234")
-        time.sleep(2)
-        if run("curl -s -m 5 http://localhost:1234/v1/models >/dev/null"):
-            print("LM Studio API up on :1234", flush=True)
+        if wait_http("http://localhost:1234/v1/models", name="LM Studio :1234"):
+            pass
         else:
-            print("LM Studio API not responding yet (model may still be downloading)", flush=True)
+            print("--- last 15 lines of LM Studio log ---", flush=True)
+            try:
+                print("\n".join(open("/tmp/lmstudio:1234.log").readlines()[-15:]), flush=True)
+            except Exception:
+                pass
     else:
         print("lms missing", flush=True)
 
@@ -344,11 +358,13 @@ def main():
     if shutil.which("opencode"):
         os.environ["OPENCODE_SERVER_PASSWORD"] = PASSWORD  # secure opencode web (fixes unsecured warning)
         run_bg(f'opencode web --port 2456 --hostname 0.0.0.0', "opencode:2456")
+        wait_http("http://localhost:2456", tries=6, name="Opencode :2456")
     else:
         print("opencode missing, install via: curl -fsSL https://opencode.ai/install | bash", flush=True)
 
     if shutil.which("openchamber"):
         run_bg('openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', "openchamber:3000")
+        wait_http("http://localhost:3000", tries=6, name="OpenChamber :3000")
 
     time.sleep(3)
 
