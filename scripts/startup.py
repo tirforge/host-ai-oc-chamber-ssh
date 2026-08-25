@@ -220,6 +220,15 @@ def main():
     if not MODEL or not MODEL.strip():
         MODEL = MODEL_DEFAULT
     MODEL = MODEL.strip()
+    # HuggingFace Spaces are also supported as a model source (pull GGUF from the space).
+    # Detect "/spaces/" early so we can strip it and set repo_type for the HF download.
+    MODEL_REPO_TYPE = "model"
+    if "/spaces/" in MODEL.lower():
+        MODEL_REPO_TYPE = "space"
+        MODEL = MODEL.split("/spaces/", 1)[1]
+    elif MODEL.lower().startswith("spaces/"):
+        MODEL_REPO_TYPE = "space"
+        MODEL = MODEL[len("spaces/"):]
     # Accept either "user/repo" or a full HuggingFace URL (strip scheme/host/query)
     for _p in ("https://", "http://"):
         if MODEL.startswith(_p):
@@ -351,6 +360,8 @@ def main():
         print(f"Pulling model {MODEL}...", flush=True)
         run("lms daemon up || true")
         base = MODEL.split(":")[0]  # llmster regex rejects ':QUANT' suffix
+        # HF Spaces are pulled directly via huggingface_hub with --repo-type space
+        rt_flag = "--repo-type space " if MODEL_REPO_TYPE == "space" else ""
         # try base repo id first, then full, then direct HuggingFace download into LM Studio models dir (auto-discovered)
         if not run(f'lms get "{base}" -y'):
             if not run(f'lms get "{base}"'):
@@ -359,13 +370,13 @@ def main():
                 quant = MODEL_QUANT
                 dest = os.path.expanduser(f"~/.lmstudio/models/{base}")
                 os.makedirs(dest, exist_ok=True)
-                run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" --include "*{quant}*" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" --include "*{quant}*" --local-dir "{dest}" </dev/null) || true')
+                run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" {rt_flag}--include "*{quant}*" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" {rt_flag}--include "*{quant}*" --local-dir "{dest}" </dev/null) || true')
                 import glob as _g
                 ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
                 if not ggufs and quant:
                     # quant filter matched nothing (repo ships a different quant) -> grab all GGUFs
                     print(f"quant '*{quant}*' not found in {base}, downloading all GGUF files", flush=True)
-                    run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" --include "*.gguf" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" --include "*.gguf" --local-dir "{dest}" </dev/null) || true')
+                    run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" {rt_flag}--include "*.gguf" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" {rt_flag}--include "*.gguf" --local-dir "{dest}" </dev/null) || true')
                     ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
                 if ggufs:
                     print(f"Downloaded {len(ggufs)} GGUF file(s) -> {dest}", flush=True)
@@ -374,8 +385,10 @@ def main():
                     # trigger scan then load by discovered model key
                     ls = subprocess.run("lms ls", shell=True, capture_output=True, text=True).stdout
                     key = None
+                    g0 = max(ggufs, key=os.path.getsize)
+                    g0base = os.path.basename(g0).replace(".gguf", "").lower()
                     for line in ls.splitlines():
-                        if "qwen3-coder" in line.lower():
+                        if g0base in line.lower() or "qwen3-coder" in line.lower():
                             key = line.split()[0]
                             break
                     if key:

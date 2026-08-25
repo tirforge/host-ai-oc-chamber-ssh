@@ -35,6 +35,16 @@ if [ "$MODEL" = "qwen/qwen3-coder-30b-a3b" ] || [ "$MODEL" = "qwen3-coder-30b-a3
   MODEL="lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF"
 fi
 
+# HuggingFace Space support: pull GGUF directly with --repo-type space
+HF_REPO_TYPE=""
+if echo "$MODEL" | grep -qi "/spaces/"; then
+  MODEL="$(echo "$MODEL" | sed -E 's#.*/spaces/##')"
+  HF_REPO_TYPE="--repo-type space"
+elif echo "$MODEL" | grep -qi "^spaces/"; then
+  MODEL="$(echo "$MODEL" | sed -E 's#^spaces/##')"
+  HF_REPO_TYPE="--repo-type space"
+fi
+
 echo "Pulling model $MODEL (default: lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF) if missing..."
 lms daemon up || true
 base="${MODEL%%:*}"  # llmster rejects ':QUANT'
@@ -42,7 +52,7 @@ if ! lms get "$base" -y && ! lms get "$base"; then
   echo "lms get failed -> direct HF download into ~/.lmstudio/models ..."
   _dest="$HOME/.lmstudio/models/$base"; mkdir -p "$_dest"
   pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true
-  (hf download "$base" --include "*Q4_K_M*" --local-dir "$_dest" </dev/null || huggingface-cli download "$base" --include "*Q4_K_M*" --local-dir "$_dest" </dev/null) || echo "HF direct failed"
+  (hf download "$base" $HF_REPO_TYPE --include "*Q4_K_M*" --local-dir "$_dest" </dev/null || huggingface-cli download "$base" $HF_REPO_TYPE --include "*Q4_K_M*" --local-dir "$_dest" </dev/null) || echo "HF direct failed"
 fi
 echo "Starting LM Studio..."
 lms server start --port 1234 --cors &
