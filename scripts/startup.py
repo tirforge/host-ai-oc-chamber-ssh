@@ -100,7 +100,8 @@ def main():
     DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
-    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD")
+    # SSH password: SSH_PASSWORD -> SSH_PASS -> fallback to OpenChamber UI password
+    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD") or PASSWORD
     # MODEL: if secret not present -> default, if passed -> use that (no :QUANT - llmster regex rejects colon; use HF repo id)
     MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
@@ -136,7 +137,16 @@ def main():
             else:
                 print(f"User {u} not found, skipping chpasswd", flush=True)
     else:
-        print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
+        # fallback: use OpenChamber UI password for SSH too
+        if PASSWORD and PASSWORD != "changeme":
+            os.environ["SSH_PASSWORD"] = PASSWORD
+            ssh_user = os.getenv("USER") or "root"
+            for u in list({ssh_user, "root"}):
+                if run(f"id -u {u} >/dev/null 2>&1"):
+                    run(f'echo "{u}:{PASSWORD}" | chpasswd 2>&1 || true')
+                    print(f"SSH password set for {u} (from OPENCHAMBER_UI_PASSWORD)", flush=True)
+        else:
+            print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
 
     print(f"Domain: {DOMAIN} Tunnel: {TUNNEL} Model: {MODEL} (default {MODEL_DEFAULT} if no secret)", flush=True)
     # Patch opencode.json to ensure requested MODEL is listed with tool_call

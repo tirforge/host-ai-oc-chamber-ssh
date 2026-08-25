@@ -12,7 +12,7 @@ MODEL=${MODEL:-lmstudio-community/Qwen3-Coder-30B-A3B-GGUF}
 # also allow positional 3rd arg as model
 if [ -n "$3" ]; then MODEL="$3"; fi
 
-# SSH password from env/Kaggle (SSH_PASSWORD or SSH_PASS) - only chpasswd, only existing users
+# SSH password: SSH_PASSWORD -> SSH_PASS -> fallback to OpenChamber UI password
 if [ -n "${SSH_PASSWORD:-}" ]; then
   echo "Configuring SSH password from SSH_PASSWORD env..."
   _ssh_user="${USER:-root}"
@@ -25,6 +25,9 @@ if [ -n "${SSH_PASSWORD:-}" ]; then
 elif [ -n "${SSH_PASS:-}" ]; then
   echo "Configuring SSH password from SSH_PASS..."
   for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then echo "$_u:$SSH_PASS" | chpasswd 2>&1 || true; echo "SSH password set for $_u"; fi; done
+elif [ -n "${OPENCHAMBER_UI_PASSWORD:-}" ] && [ "${OPENCHAMBER_UI_PASSWORD}" != "changeme" ]; then
+  echo "Using OPENCHAMBER_UI_PASSWORD for SSH..."
+  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then echo "$_u:$OPENCHAMBER_UI_PASSWORD" | chpasswd 2>&1 || true; echo "SSH password set for $_u (from OPENCHAMBER_UI_PASSWORD)"; fi; done
 fi
 # Map old alias to valid HF repo
 if [ "$MODEL" = "qwen/qwen3-coder-30b-a3b" ] || [ "$MODEL" = "qwen3-coder-30b-a3b" ]; then
