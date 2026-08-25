@@ -23,10 +23,11 @@ def test_opencode_wiring():
     assert "opencode-lmstudio@1.0.0-rc.2" in j["plugin"]
     for prov in ["lmstudio-local", "lmstudio-tunneled"]:
         assert prov in j["provider"]
-        m = j["provider"][prov]["models"]["qwen3-coder-30b-a3b"]
+        m = j["provider"][prov]["models"]["qwen3-coder-30b-a3b-instruct"]
         assert m["tool_call"] is True
         assert m["reasoning"] is True
-        assert m["limit"]["context"] == 32768
+        assert m["limit"]["context"] == 49152
+        assert m["limit"]["output"] == 32768
 
 
 def test_dual_t4_config():

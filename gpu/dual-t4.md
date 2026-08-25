@@ -10,8 +10,8 @@ Your host is dual T4 - this config is wired for it.
 
 ## Wiring
 - `CUDA_VISIBLE_DEVICES=0,1` - LM Studio / llama.cpp auto-splits
-- `lms get qwen/qwen3-coder-30b-a3b -y` then `lms server start --port 1234 --cors --gpu max --jinja --spec-type draft-mtp`
-- Keep `context_length 32768` (not 262k) - KV for 262k needs >40GB
+- `lms get lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF -y` then `lms server start --port 1234 --cors --gpu max --jinja --spec-type draft-mtp`
+- Keep `context_length 49152` (48K) - **64K OOMs on dual T4** (`unable to allocate CUDA0 buffer`); 262K needs >40GB so never use it
 - `Q4_K_M` leaves ~14GB for KV headroom, `Q6_K` leaves ~10GB
 
 ## Verify on host

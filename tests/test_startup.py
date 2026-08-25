@@ -8,6 +8,10 @@ def load_startup():
     # prevent top-level exit by mocking CF_TOKEN check: set dummy env
     os.environ["CF_TOKEN"] = "dummy"
     os.environ["CF_DOMAIN"] = "example.com"
+    # isolate from any MODEL* env vars leaked into the test shell
+    for k in list(os.environ):
+        if k.upper() in ("MODEL", "MODEL_NAME", "MODEL_QUANT"):
+            os.environ.pop(k, None)
     src = open("scripts/startup.py").read()
     exec_globals = {}
     exec(compile(src.split("def main():")[0], "scripts/startup.py", "exec"), exec_globals)
@@ -15,14 +19,26 @@ def load_startup():
 
 
 def test_get_secret_env():
-    get_secret = load_startup()
-    os.environ["MODEL"] = "mistralai/devstral-small-2507"
-    assert get_secret("MODEL") == "mistralai/devstral-small-2507"
-    os.environ.pop("MODEL", None)
-    os.environ["MODEL_NAME"] = "qwen/qwen3.5-35b-a3b"
-    assert get_secret("MODEL_NAME") == "qwen/qwen3.5-35b-a3b"
-    os.environ.pop("MODEL_NAME", None)
-    assert get_secret("MODEL") is None
+    # isolate from any real Kaggle secret so we test pure env precedence
+    fake = types.ModuleType("kaggle_secrets")
+
+    class FakeClient:
+        def get_secret(self, k):
+            raise KeyError(k)
+
+    fake.UserSecretsClient = FakeClient
+    sys.modules["kaggle_secrets"] = fake
+    try:
+        get_secret = load_startup()
+        os.environ["MODEL"] = "mistralai/devstral-small-2507"
+        assert get_secret("MODEL") == "mistralai/devstral-small-2507"
+        os.environ.pop("MODEL", None)
+        os.environ["MODEL_NAME"] = "qwen/qwen3.5-35b-a3b"
+        assert get_secret("MODEL_NAME") == "qwen/qwen3.5-35b-a3b"
+        os.environ.pop("MODEL_NAME", None)
+        assert get_secret("MODEL") is None
+    finally:
+        sys.modules.pop("kaggle_secrets", None)
 
 
 def test_get_secret_kaggle():
