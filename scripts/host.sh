@@ -5,9 +5,12 @@ set -e
 
 DOMAIN=${1:-yourdomain.com}
 TUNNEL=${2:-t4host}
+MODEL=${MODEL:-qwen/qwen3-coder-30b-a3b}
+# also allow positional 3rd arg as model
+if [ -n "$3" ]; then MODEL="$3"; fi
 
-echo "Pulling default model qwen3-coder-30b-a3b (Qwen3 Coder 30B A3B) if missing..."
-lms get qwen/qwen3-coder-30b-a3b -y || echo "lms get failed, check LM Studio catalog"
+echo "Pulling model $MODEL (default: qwen/qwen3-coder-30b-a3b) if missing..."
+lms get "$MODEL" -y || lms get "$MODEL" || echo "lms get $MODEL failed, check LM Studio catalog"
 echo "Starting LM Studio..."
 lms server start --port 1234 --cors &
 echo "Starting Opencode Web (full tool support, port 2456)..."

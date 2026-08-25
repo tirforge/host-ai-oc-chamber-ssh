@@ -22,20 +22,20 @@ import time
 import shutil
 
 def get_secret(name, default=None):
-    # 1. os.environ
+    # 1. os.environ (strip empty)
     for k in [name, name.upper(), name.lower()]:
         v = os.getenv(k)
-        if v:
-            return v
+        if v and v.strip():
+            return v.strip()
     # 2. Kaggle UserSecretsClient
     try:
         from kaggle_secrets import UserSecretsClient
         c = UserSecretsClient()
-        for k in [name, name.upper()]:
+        for k in [name, name.upper(), name.lower(), f"_{name.upper()}"]:
             try:
                 v = c.get_secret(k)
-                if v:
-                    return v
+                if v and str(v).strip():
+                    return str(v).strip()
             except Exception:
                 pass
     except ImportError:
@@ -54,7 +54,12 @@ def run(cmd):
 CF_TOKEN = get_secret("CF_TOKEN") or get_secret("CLOUDFLARE_API_TOKEN") or get_secret("CLOUDFLARE_TOKEN")
 DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
 PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
-MODEL = get_secret("MODEL") or "qwen/qwen3-coder-30b-a3b"
+# MODEL: if secret not present -> default qwen3-coder-30b-a3b, if passed -> use that
+MODEL_DEFAULT = "qwen/qwen3-coder-30b-a3b"
+MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
+if not MODEL or not MODEL.strip():
+    MODEL = MODEL_DEFAULT
+MODEL = MODEL.strip()
 TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
 
 if not CF_TOKEN or not DOMAIN:
@@ -68,7 +73,22 @@ os.environ["OPENCHAMBER_UI_PASSWORD"] = PASSWORD
 os.environ["CLOUDFLARE_API_TOKEN"] = CF_TOKEN
 os.environ["CF_API_TOKEN"] = CF_TOKEN
 
-print(f"Domain: {DOMAIN} Tunnel: {TUNNEL} Model: {MODEL}", flush=True)
+print(f"Domain: {DOMAIN} Tunnel: {TUNNEL} Model: {MODEL} (default {MODEL_DEFAULT} if no secret)", flush=True)
+# Patch opencode.json to ensure requested MODEL is listed with tool_call
+try:
+    import json
+    p = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
+    if os.path.exists(p):
+        j = json.load(open(p))
+        for prov in ["lmstudio-local", "lmstudio-tunneled"]:
+            if prov in j.get("provider", {}):
+                m = j["provider"][prov].setdefault("models", {})
+                if MODEL not in m:
+                    m[MODEL] = {"name": MODEL, "tool_call": True, "reasoning": True, "limit": {"context": 32768, "output": 8192}}
+                    print(f"Added {MODEL} to opencode.json provider {prov}", flush=True)
+        open(p, "w").write(json.dumps(j, indent=2))
+except Exception as e:
+    print(f"opencode.json patch skipped: {e}", flush=True)
 
 # 1. Pull model (LM Studio)
 if shutil.which("lms"):
