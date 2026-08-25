@@ -114,19 +114,26 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
             print("CF API: no account access - check token perms", flush=True)
             return None
         aid = acc["result"][0]["id"]
-        # 2. create tunnel (remote-managed)
+        # 2. create tunnel (remote-managed); reuse if name exists
         t = api("POST", f"/accounts/{aid}/cfd_tunnel", {"name": tunnel_name, "config_src": "cloudflare"})
-        if not t.get("success"):
-            errs = str(t.get("errors"))
-            if "already exists" in errs or "10603" in errs:
-                lst = api("GET", f"/accounts/{aid}/cfd_tunnel?name={tunnel_name}&is_deleted=false")
-                tid = lst["result"][0]["id"]; tok = None
-                ttok = api("GET", f"/accounts/{aid}/cfd_tunnel/{tid}/token")
-                tok = ttok["result"] if ttok.get("success") else None
-            else:
-                print(f"CF tunnel create failed: {errs}", flush=True); return None
+        tid = None
+        if t.get("success"):
+            tid = t["result"]["id"]
         else:
-            tid = t["result"]["id"]; tok = t["result"].get("token")
+            errs = str(t.get("errors"))
+            print(f"create -> {errs[:120]} (will reuse existing)", flush=True)
+            lst = api("GET", f"/accounts/{aid}/cfd_tunnel?is_deleted=false")
+            for cand in (lst.get("result") or []):
+                if cand.get("name") == tunnel_name:
+                    tid = cand["id"]
+                    break
+            if not tid:
+                print(f"No tunnel named {tunnel_name} found", flush=True)
+                return None
+        tok = None
+        ttok = api("GET", f"/accounts/{aid}/cfd_tunnel/{tid}/token")
+        if ttok.get("success"):
+            tok = ttok["result"]
         # 3. ingress config (remote-managed): ai/oc/chamber/ssh -> local ports
         ing = {
             "config": {"ingress": [
@@ -328,7 +335,15 @@ def main():
                             break
                     if key:
                         print(f"Loading discovered key: {key}", flush=True)
-                        run(f'lms load "{key}" -y --gpu max || lms load "{key}" -y || true')
+                        # CUDA OOM retry ladder: default -> 16384 -> 8192 -> 4096 ctx (dual T4 32GB)
+                        loaded = False
+                        for ctx in ["", "--context-length 16384", "--context-length 8192", "--context-length 4096"]:
+                            if run(f'lms load "{key}" -y --gpu max {ctx}'):
+                                loaded = True
+                                break
+                            print(f"load failed{f' with {ctx}' if ctx else ' with default ctx'} - trying smaller context...", flush=True)
+                        if not loaded:
+                            print("All load attempts OOMed - set MODEL to a smaller GGUF (e.g. Qwen2.5-Coder-7B)", flush=True)
                     else:
                         g0 = max(ggufs, key=os.path.getsize)
                         print(f"Key not found via lms ls; relying on JIT auto-load of {os.path.basename(g0)}", flush=True)
@@ -354,6 +369,10 @@ def main():
     else:
         print("lms missing", flush=True)
 
+    time.sleep(1)
+    # kill stale port holders from previous runs (prevents opencode/openchamber DOWN)
+    for port in [2456, 3000]:
+        run(f"fuser -k {port}/tcp 2>/dev/null || true")
     time.sleep(1)
     if shutil.which("opencode"):
         os.environ["OPENCODE_SERVER_PASSWORD"] = PASSWORD  # secure opencode web (fixes unsecured warning)
@@ -432,43 +451,47 @@ ingress:
 
     print("All services started. Keepalive monitor running (checks every 30s)... Ctrl+C to stop.", flush=True)
     SERVICES = [
-        ("LM Studio :1234", "http://localhost:1234/v1/models"),
-        ("Opencode :2456", "http://localhost:2456"),
-        ("OpenChamber :3000", "http://localhost:3000"),
+        ("LM Studio :1234", "http://localhost:1234/v1/models", "lms server start --port 1234 --cors", 1234),
+        ("Opencode :2456", "http://localhost:2456", "opencode web --port 2456 --hostname 0.0.0.0", 2456),
+        ("OpenChamber :3000", "http://localhost:3000", 'openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', 3000),
     ]
     last = {}
+    down_count = {}
     tick = 0
     try:
         while True:
             time.sleep(30)
             tick += 1
-            # 1. port listeners
+            # port listeners
             r = subprocess.run(
                 "ss -tlnp 2>/dev/null | grep -E ':(1234|2456|3000|22)\\b' || netstat -tlnp 2>/dev/null | grep -E ':(1234|2456|3000|22)\\b'",
                 shell=True, capture_output=True, text=True)
-            listeners = r.stdout.strip().splitlines()
-            # 2. HTTP health per service + auto-restart dead tunnels
+            listeners = [ln for ln in r.stdout.strip().splitlines() if ln]
             status = []
-            for nm, url in SERVICES:
+            for nm, url, cmd, port in SERVICES:
                 c = subprocess.run(f"curl -s -m 5 -o /dev/null -w '%{{http_code}}' {url}", shell=True, capture_output=True, text=True).stdout.strip()
                 ok = c.startswith("2")
-                if last.get(nm) != ok:  # state change only
+                if last.get(nm) != ok:
                     print(f"[{time.strftime('%H:%M:%S')}] {nm}: {'UP' if ok else 'DOWN'} (http {c})", flush=True)
                 last[nm] = ok
                 status.append(f"{nm.split(' :')[1].strip(':')}={'OK' if ok else 'DOWN'}")
-            for p in tunnels:
+                # auto-restart service after 2 consecutive DOWNs
+                if not ok:
+                    down_count[nm] = down_count.get(nm, 0) + 1
+                    if down_count[nm] >= 2:
+                        print(f"{nm} DOWN x{down_count[nm]} -> restarting...", flush=True)
+                        run(f"fuser -k {port}/tcp 2>/dev/null || true")
+                        run_bg(cmd, f"{nm.split(' :')[1].strip(':')}-restart")
+                        down_count[nm] = 0
+                else:
+                    down_count[nm] = 0
+            # restart dead tunnels
+            for i, p in enumerate(tunnels):
                 if p.poll() is not None:
                     print(f"TUNNEL DIED: {p.args} code={p.returncode} -> restarting...", flush=True)
-                    try:
-                        p2 = subprocess.Popen(p.args, shell=True, start_new_session=True,
-                                              stdout=open(p.args.get("log", "/tmp/tunnel.log"), "ab") if isinstance(p.args, dict) else open("/tmp/cloudflared-restart.log", "ab"),
-                                              stderr=subprocess.STDOUT)
-                        tunnels[tunnels.index(p)] = p2
-                    except Exception as e:
-                        print(f"restart failed: {e}", flush=True)
-            if tick % 6 == 0:  # every ~3 min print compact summary incl. listeners
-                ports_up = [ln.split()[-1] if ln else "" for ln in listeners]
-                print(f"[{time.strftime('%H:%M:%S')}] keepalive #{tick}: {' '.join(status)} | listening: {len(listeners)} (ports 1234/2456/3000/22)", flush=True)
+                    tunnels[i] = run_bg(p.args, f"cloudflared-restart-{i}")
+            if tick % 6 == 0:
+                print(f"[{time.strftime('%H:%M:%S')}] keepalive #{tick}: {' '.join(status)} | listening: {len(listeners)} ports", flush=True)
     except KeyboardInterrupt:
         print("Stopping...", flush=True)
         for p in tunnels:
