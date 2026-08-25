@@ -62,7 +62,8 @@ Kaggle notebook must have **Internet ON** (Settings -> Internet) and **GPU T4 x2
 Add Secrets in Kaggle Notebook: `Add-ons -> Secrets` and toggle on for this notebook:
 * `CF_TOKEN` (or `CLOUDFLARE_API_TOKEN`) - CF API token with Zone/DNS/Tunnel Edit **or** `TUNNEL_TOKEN` (Zero Trust -> Networks -> Tunnels -> Create tunnel -> Copy token) - if you use `TUNNEL_TOKEN` you don't need `CF_TOKEN` API calls
 * `CF_DOMAIN` - `yourdomain.com` (your Cloudflare domain)
-* `OPENCHAMBER_UI_PASSWORD` (or `PASSWORD`)
+* `OPENCHAMBER_UI_PASSWORD` (or `PASSWORD`) - WebUI password for `oc` + `chamber`
+* `SSH_PASSWORD` (or `SSH_PASS`) - **SSH password** for `ssh.yourdomain.com` (sets Linux `root` + current user via `chpasswd`, tune via env)
 * `MODEL` (optional, default `qwen/qwen3-coder-30b-a3b` A3B - if secret missing -> default, if set like `mistralai/devstral-small-2507` -> pulls that)
 * `TUNNEL_TOKEN` (optional alternative to `CF_TOKEN` for headless Kaggle where `cloudflared tunnel login` browser is impossible)
 

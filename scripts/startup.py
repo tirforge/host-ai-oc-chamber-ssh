@@ -9,6 +9,7 @@ Env secrets (set in Kaggle Secrets -> Add-ons -> Secrets):
   CF_TOKEN / CLOUDFLARE_API_TOKEN / CLOUDFLARE_TOKEN
   CF_DOMAIN / CLOUDFLARE_DOMAIN / DOMAIN  (e.g. yourdomain.com)
   OPENCHAMBER_UI_PASSWORD / UI_PASSWORD / PASSWORD
+  SSH_PASSWORD / SSH_PASS (for ssh.yourdomain.com via cloudflared, sets Linux password for root/current user)
   MODEL  (default: qwen/qwen3-coder-30b-a3b)
   TUNNEL_NAME (default: t4host)
   LM_API_TOKEN (optional, for ai subdomain auth)
@@ -74,12 +75,14 @@ def main():
         secret_value_2 = user_secrets.get_secret("MODEL")
         secret_value_3 = user_secrets.get_secret("OPENCHAMBER_UI_PASSWORD")
         secret_value_4 = user_secrets.get_secret("TUNNEL_TOKEN")
+        secret_value_5 = user_secrets.get_secret("SSH_PASSWORD")
         # tune via env: if you set env, it overrides; otherwise use Kaggle secret
         if secret_value_0 and not os.getenv("CF_DOMAIN"): os.environ["CF_DOMAIN"] = secret_value_0.strip()
         if secret_value_1 and not os.getenv("CF_TOKEN"): os.environ["CF_TOKEN"] = secret_value_1.strip()
         if secret_value_2 and not os.getenv("MODEL"): os.environ["MODEL"] = secret_value_2.strip()
         if secret_value_3 and not os.getenv("OPENCHAMBER_UI_PASSWORD"): os.environ["OPENCHAMBER_UI_PASSWORD"] = secret_value_3.strip()
         if secret_value_4 and not os.getenv("TUNNEL_TOKEN"): os.environ["TUNNEL_TOKEN"] = secret_value_4.strip()
+        if secret_value_5 and not os.getenv("SSH_PASSWORD"): os.environ["SSH_PASSWORD"] = secret_value_5.strip()
     except Exception:
         pass  # not in Kaggle or secrets not set - fallback to env/get_secret below
 
@@ -87,6 +90,7 @@ def main():
     DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
+    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD")
     # MODEL: if secret not present -> default qwen3-coder-30b-a3b, if passed -> use that
     MODEL_DEFAULT = "qwen/qwen3-coder-30b-a3b"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
@@ -105,8 +109,18 @@ def main():
         sys.exit(1)
 
     os.environ["OPENCHAMBER_UI_PASSWORD"] = PASSWORD
-    os.environ["CLOUDFLARE_API_TOKEN"] = CF_TOKEN
-    os.environ["CF_API_TOKEN"] = CF_TOKEN
+    os.environ["CLOUDFLARE_API_TOKEN"] = CF_TOKEN if CF_TOKEN else ""
+    os.environ["CF_API_TOKEN"] = CF_TOKEN if CF_TOKEN else ""
+    if SSH_PASSWORD and SSH_PASSWORD.strip():
+        os.environ["SSH_PASSWORD"] = SSH_PASSWORD.strip()
+        # configure SSH password (Kaggle/local) - sets for current user + root
+        ssh_user = os.getenv("USER") or "root"
+        for u in list({ssh_user, "root", "kaggle", "jupyter"}):
+            # chpasswd is most portable, fallback to passwd --stdin
+            run(f'echo "{u}:{SSH_PASSWORD.strip()}" | chpasswd 2>&1 || echo "{SSH_PASSWORD.strip()}" | passwd --stdin {u} 2>&1 || true')
+        print(f"SSH password configured for {ssh_user}/root (from SSH_PASSWORD secret)", flush=True)
+    else:
+        print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
 
     print(f"Domain: {DOMAIN} Tunnel: {TUNNEL} Model: {MODEL} (default {MODEL_DEFAULT} if no secret)", flush=True)
     # Patch opencode.json to ensure requested MODEL is listed with tool_call
