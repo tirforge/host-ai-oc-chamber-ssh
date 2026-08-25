@@ -93,14 +93,22 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
     Returns run-JWT for `cloudflared tunnel run --token`, or None."""
     import json as _json
     try:
+        import urllib.error
         import urllib.request
         H = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
         def api(method, path, body=None):
             req = urllib.request.Request(f"https://api.cloudflare.com/client/v4{path}",
                                          data=_json.dumps(body).encode() if body else None,
                                          headers=H, method=method)
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return _json.load(r)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:  # noqa
+                    return _json.load(r)
+            except urllib.error.HTTPError as e:
+                # 4xx still carries JSON (e.g. 409 = tunnel already exists -> reuse path)
+                try:
+                    return _json.load(e)
+                except Exception:
+                    return {"success": False, "errors": [{"message": str(e)}]}
         # 1. account id - prefer /accounts; fallback to zone lookup (zone-scoped tokens return empty accounts)
         aid = None
         acc = api("GET", "/accounts")
