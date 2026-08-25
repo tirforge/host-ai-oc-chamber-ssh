@@ -430,13 +430,45 @@ ingress:
     else:
         print("cloudflared missing, install via: curl -fsSL https://pkg.cloudflare.com/cloudflared | sh", flush=True)
 
-    print("All services started. Tailing... Ctrl+C to stop.", flush=True)
+    print("All services started. Keepalive monitor running (checks every 30s)... Ctrl+C to stop.", flush=True)
+    SERVICES = [
+        ("LM Studio :1234", "http://localhost:1234/v1/models"),
+        ("Opencode :2456", "http://localhost:2456"),
+        ("OpenChamber :3000", "http://localhost:3000"),
+    ]
+    last = {}
+    tick = 0
     try:
         while True:
-            time.sleep(10)
+            time.sleep(30)
+            tick += 1
+            # 1. port listeners
+            r = subprocess.run(
+                "ss -tlnp 2>/dev/null | grep -E ':(1234|2456|3000|22)\\b' || netstat -tlnp 2>/dev/null | grep -E ':(1234|2456|3000|22)\\b'",
+                shell=True, capture_output=True, text=True)
+            listeners = r.stdout.strip().splitlines()
+            # 2. HTTP health per service + auto-restart dead tunnels
+            status = []
+            for nm, url in SERVICES:
+                c = subprocess.run(f"curl -s -m 5 -o /dev/null -w '%{{http_code}}' {url}", shell=True, capture_output=True, text=True).stdout.strip()
+                ok = c.startswith("2")
+                if last.get(nm) != ok:  # state change only
+                    print(f"[{time.strftime('%H:%M:%S')}] {nm}: {'UP' if ok else 'DOWN'} (http {c})", flush=True)
+                last[nm] = ok
+                status.append(f"{nm.split(' :')[1].strip(':')}={'OK' if ok else 'DOWN'}")
             for p in tunnels:
                 if p.poll() is not None:
-                    print(f"Process exited: {p.args} code={p.returncode}", flush=True)
+                    print(f"TUNNEL DIED: {p.args} code={p.returncode} -> restarting...", flush=True)
+                    try:
+                        p2 = subprocess.Popen(p.args, shell=True, start_new_session=True,
+                                              stdout=open(p.args.get("log", "/tmp/tunnel.log"), "ab") if isinstance(p.args, dict) else open("/tmp/cloudflared-restart.log", "ab"),
+                                              stderr=subprocess.STDOUT)
+                        tunnels[tunnels.index(p)] = p2
+                    except Exception as e:
+                        print(f"restart failed: {e}", flush=True)
+            if tick % 6 == 0:  # every ~3 min print compact summary incl. listeners
+                ports_up = [ln.split()[-1] if ln else "" for ln in listeners]
+                print(f"[{time.strftime('%H:%M:%S')}] keepalive #{tick}: {' '.join(status)} | listening: {len(listeners)} (ports 1234/2456/3000/22)", flush=True)
     except KeyboardInterrupt:
         print("Stopping...", flush=True)
         for p in tunnels:
