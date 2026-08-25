@@ -64,6 +64,25 @@ def ensure_tool(name, install_cmd):
     return shutil.which(name) is not None
 
 def main():
+    # Kaggle explicit format you requested - you can tune these 5 via Kaggle Secrets UI
+    # This populates env so get_secret() picks them up
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        secret_value_0 = user_secrets.get_secret("CF_DOMAIN")
+        secret_value_1 = user_secrets.get_secret("CF_TOKEN")
+        secret_value_2 = user_secrets.get_secret("MODEL")
+        secret_value_3 = user_secrets.get_secret("OPENCHAMBER_UI_PASSWORD")
+        secret_value_4 = user_secrets.get_secret("TUNNEL_TOKEN")
+        # tune via env: if you set env, it overrides; otherwise use Kaggle secret
+        if secret_value_0 and not os.getenv("CF_DOMAIN"): os.environ["CF_DOMAIN"] = secret_value_0.strip()
+        if secret_value_1 and not os.getenv("CF_TOKEN"): os.environ["CF_TOKEN"] = secret_value_1.strip()
+        if secret_value_2 and not os.getenv("MODEL"): os.environ["MODEL"] = secret_value_2.strip()
+        if secret_value_3 and not os.getenv("OPENCHAMBER_UI_PASSWORD"): os.environ["OPENCHAMBER_UI_PASSWORD"] = secret_value_3.strip()
+        if secret_value_4 and not os.getenv("TUNNEL_TOKEN"): os.environ["TUNNEL_TOKEN"] = secret_value_4.strip()
+    except Exception:
+        pass  # not in Kaggle or secrets not set - fallback to env/get_secret below
+
     CF_TOKEN = get_secret("CF_TOKEN") or get_secret("CLOUDFLARE_API_TOKEN") or get_secret("CLOUDFLARE_TOKEN")
     DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
