@@ -89,12 +89,18 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
                                          headers=H, method=method)
             with urllib.request.urlopen(req, timeout=30) as r:
                 return _json.load(r)
-        # 1. account id
+        # 1. account id - prefer /accounts; fallback to zone lookup (zone-scoped tokens return empty accounts)
+        aid = None
         acc = api("GET", "/accounts")
-        if not acc.get("success"):
-            print(f"CF API accounts failed: {acc.get('errors')}", flush=True)
-            print("Your token lacks permissions. Create API token with: Account > Cloudflare Tunnel > Edit + Zone > DNS > Edit (aaruvi.space).", flush=True)
-            print("Or use Zero Trust dashboard tunnel JWT (starts with eyJ) as TUNNEL_TOKEN instead.", flush=True)
+        if acc.get("success") and acc["result"]:
+            aid = acc["result"][0]["id"]
+        if not aid:
+            z0 = api("GET", f"/zones?name={domain}")
+            if z0.get("success") and z0["result"]:
+                aid = z0["result"][0]["account"]["id"]
+                print(f"Account id derived from zone {domain}: {aid}", flush=True)
+        if not aid:
+            print("CF API: no account access - check token perms", flush=True)
             return None
         aid = acc["result"][0]["id"]
         # 2. create tunnel (remote-managed)
