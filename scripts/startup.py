@@ -155,17 +155,38 @@ def main():
     except Exception as e:
         print(f"opencode.json patch skipped: {e}", flush=True)
 
-    # Kaggle/CI auto-install missing tools
+    # Kaggle/CI auto-install missing tools - ensure PATH first (fix lms/opencode not found)
+    for p in [os.path.expanduser("~/.lmstudio/bin"), os.path.expanduser("~/.opencode/bin"), os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
+        if p not in os.environ.get("PATH",""):
+            os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
+    for pat in [os.path.expanduser("~/.nvm/versions/node/v22*/bin"), os.path.expanduser("~/.local/share/fnm/aliases/default/bin")]:
+        import glob as _glob
+        for p in _glob.glob(pat):
+            if p not in os.environ.get("PATH",""):
+                os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
     ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"; lms daemon up || true")
-    ensure_tool("cloudflared", "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared || curl -fsSL https://pkg.cloudflare.com/cloudflared.deb -o /tmp/cloudflared.deb && dpkg -i /tmp/cloudflared.deb || true")
+    ensure_tool("cloudflared", "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared || true")
     ensure_tool("opencode", "curl -fsSL https://opencode.ai/install | bash; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
-    # openchamber needs Node 22+ - install via fnm if needed
+    # openchamber needs Node 22+ - ensure Node 22 is active before install (use nodesource for Kaggle)
     if not shutil.which("openchamber"):
-        if not shutil.which("node") or not run("node --version | grep -q 'v22\\|v23\\|v24'"):
-            print("Installing Node 22 for openchamber...", flush=True)
-            run("curl -fsSL https://fnm.vercel.app/install | bash; export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env)\"; fnm install 22; fnm use 22 || true")
-            run("curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm install 22; nvm use 22 || true")
-        ensure_tool("openchamber", "curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
+        has_node22 = shutil.which("node") and run("node --version | grep -q 'v22\\|v23\\|v24'")
+        if not has_node22:
+            print("Installing Node 22 for openchamber (nodesource + fnm fallback)...", flush=True)
+            run("curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs || true")
+            # verify
+            run("node --version; npm --version || true")
+            if not (shutil.which("node") and run("node --version | grep -q 'v22'")):
+                run("curl -fsSL https://fnm.vercel.app/install | bash || true")
+                run("bash -c 'export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env 2>/dev/null)\" || true; fnm install 22; fnm use 22; node --version' || true")
+        # update PATH for this process after Node install
+        for pat in [os.path.expanduser("~/.nvm/versions/node/v22*/bin"), os.path.expanduser("~/.local/share/fnm/aliases/default/bin")]:
+            import glob as _glob2
+            for p in _glob2.glob(pat):
+                if p not in os.environ.get("PATH",""):
+                    os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
+        run("node --version; npm --version || true")
+        # now install openchamber with Node 22 in PATH
+        run("bash -c 'export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env 2>/dev/null)\" || true; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 2>/dev/null || true; node --version; curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash' || curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
 
     # 1. Pull model (LM Studio) - try HF repo, fallback to alias
     if shutil.which("lms"):
@@ -181,8 +202,9 @@ def main():
         # try requested model, fallback to known good
         if not run(f'lms get {MODEL} -y'):
             run(f'lms get {MODEL} || true')
-        # fallback if still no model
-        run('lms get lmstudio-community/Qwen3-Coder-30B-A3B-GGUF -y || true')
+        # fallback if still no model - try known tiny model that exists in older catalog
+        for fb in ["lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M", "qwen2.5-coder-7b-instruct", "tinyllama"]:
+            run(f'lms get {fb} -y || true')
     else:
         print("lms not found, skipping model pull (install LM Studio first)", flush=True)
 
@@ -235,15 +257,24 @@ ingress:
             print(f"Using TUNNEL_TOKEN (Zero Trust JWT) for {TUNNEL} ...", flush=True)
             procs.append(run_bg(f"cloudflared tunnel run --token {TUNNEL_TOKEN}", "cloudflared"))
         elif TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("cfut_"):
-            print(f"TUNNEL_TOKEN is cfut_ API token, using named tunnel flow (create + route dns)", flush=True)
-            if not CF_TOKEN:
-                CF_TOKEN = TUNNEL_TOKEN
-                os.environ["CLOUDFLARE_API_TOKEN"] = CF_TOKEN
-            run(f"cloudflared tunnel create {TUNNEL} || true")
-            for sub in ["ai", "oc", "chamber", "ssh"]:
-                run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
-            print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
-            procs.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
+            # cfut_ API token in headless Kaggle has no cert.pem -> use quick tunnels (trycloudflare.com) as fallback
+            cert = os.path.expanduser("~/.cloudflared/cert.pem")
+            if os.path.exists(cert):
+                print(f"TUNNEL_TOKEN is cfut_ API token, using named tunnel flow (create + route dns)", flush=True)
+                if not CF_TOKEN:
+                    CF_TOKEN = TUNNEL_TOKEN
+                    os.environ["CLOUDFLARE_API_TOKEN"] = CF_TOKEN
+                run(f"cloudflared tunnel create {TUNNEL} || true")
+                for sub in ["ai", "oc", "chamber", "ssh"]:
+                    run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
+                print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
+                procs.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
+            else:
+                print(f"TUNNEL_TOKEN is cfut_ but no cert.pem (headless Kaggle) -> using quick tunnels (trycloudflare.com) for each port", flush=True)
+                # quick tunnels need no cert/domain, one per service
+                for sub, port in [("ai", 1234), ("oc", 2456), ("chamber", 3000)]:
+                    procs.append(run_bg(f"cloudflared tunnel --url http://localhost:{port} 2>&1 | sed -u 's/^/[{sub}]/'", f"cloudflared-{sub}"))
+                print(f"Quick tunnels started for ai:1234 oc:2456 chamber:3000 (check logs for https://*.trycloudflare.com URLs)", flush=True)
         else:
             run(f"cloudflared tunnel create {TUNNEL} || true")
             for sub in ["ai", "oc", "chamber", "ssh"]:
