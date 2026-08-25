@@ -72,6 +72,7 @@ def wait_http(url, tries=12, delay=5, name=""):
     return False
 
 def run(cmd):
+    # Output is shown live on the terminal so failures are easy to spot.
     print(f"$ {cmd}", flush=True)
     r = subprocess.run(cmd, shell=True)
     return r.returncode == 0
@@ -219,10 +220,19 @@ def main():
     if not MODEL or not MODEL.strip():
         MODEL = MODEL_DEFAULT
     MODEL = MODEL.strip()
+    # Accept either "user/repo" or a full HuggingFace URL (strip scheme/host/query)
+    for _p in ("https://", "http://"):
+        if MODEL.startswith(_p):
+            MODEL = MODEL[len(_p):]
+    if MODEL.startswith("huggingface.co/"):
+        MODEL = MODEL[len("huggingface.co/"):]
+    MODEL = MODEL.strip("/").split("?")[0].split("#")[0]
     # map old aliases to valid HF repo (fixes Kaggle artifact not found)
     if MODEL in ["qwen/qwen3-coder-30b-a3b", "qwen3-coder-30b-a3b", "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF", "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"]:
         print(f"Mapping alias {MODEL} -> {MODEL_DEFAULT}", flush=True)
         MODEL = MODEL_DEFAULT
+    MODEL_QUANT = os.environ.get("MODEL_QUANT") or get_secret("MODEL_QUANT") or "Q4_K_M"
+    served_model = None  # actual identifier LM Studio serves (populated after load)
     TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
 
     if not DOMAIN:
@@ -259,6 +269,25 @@ def main():
         else:
             print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
 
+    # Install & start sshd so the cloudflared ssh ingress (ssh://localhost:22) has a server.
+    # The password above is useless without an actual SSH daemon running.
+    try:
+        if not shutil.which("sshd"):
+            run("apt-get update -qq && apt-get install -y openssh-server || true")
+        run("mkdir -p /run/sshd")
+        run("ssh-keygen -A")  # generate host keys if missing
+        # Allow root password login (we set a root password above specifically for SSH access)
+        dropin = "/etc/ssh/sshd_config.d/99-cloudflare-ssh.conf"
+        with open(dropin, "w") as f:
+            f.write("PermitRootLogin yes\nPasswordAuthentication yes\n")
+        run("/usr/sbin/sshd -t && echo sshd_config OK")  # validate before (re)start
+        run("pkill -x sshd 2>/dev/null || true")
+        time.sleep(1)
+        run("/usr/sbin/sshd")
+        print("sshd installed and listening on :22", flush=True)
+    except Exception as e:
+        print(f"sshd setup skipped: {e}", flush=True)
+
     print(f"Domain: {DOMAIN} Tunnel: {TUNNEL} Model: {MODEL} (default {MODEL_DEFAULT} if no secret)", flush=True)
     # Patch opencode.json to ensure requested MODEL is listed with tool_call
     try:
@@ -270,7 +299,7 @@ def main():
                 if prov in j.get("provider", {}):
                     m = j["provider"][prov].setdefault("models", {})
                     if MODEL not in m:
-                        m[MODEL] = {"name": MODEL, "tool_call": True, "reasoning": True, "limit": {"context": 32768, "output": 8192}}
+                        m[MODEL] = {"name": MODEL, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
                         print(f"Added {MODEL} to opencode.json provider {prov}", flush=True)
             open(p, "w").write(json.dumps(j, indent=2))
     except Exception as e:
@@ -326,11 +355,18 @@ def main():
         if not run(f'lms get "{base}" -y'):
             if not run(f'lms get "{base}"'):
                 print("lms get failed -> direct HF download into ~/.lmstudio/models ...", flush=True)
+                # Quantized GGUF is the norm; allow overriding via MODEL_QUANT (default Q4_K_M).
+                quant = MODEL_QUANT
                 dest = os.path.expanduser(f"~/.lmstudio/models/{base}")
                 os.makedirs(dest, exist_ok=True)
-                run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" </dev/null) || true')
+                run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" --include "*{quant}*" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" --include "*{quant}*" --local-dir "{dest}" </dev/null) || true')
                 import glob as _g
                 ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
+                if not ggufs and quant:
+                    # quant filter matched nothing (repo ships a different quant) -> grab all GGUFs
+                    print(f"quant '*{quant}*' not found in {base}, downloading all GGUF files", flush=True)
+                    run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" --include "*.gguf" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" --include "*.gguf" --local-dir "{dest}" </dev/null) || true')
+                    ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
                 if ggufs:
                     print(f"Downloaded {len(ggufs)} GGUF file(s) -> {dest}", flush=True)
                     os.environ["GGUF_PATH"] = max(ggufs, key=os.path.getsize)  # for llama.cpp fallback
@@ -347,7 +383,8 @@ def main():
                         # CUDA OOM root cause: GGUF metadata default ctx can be 262k -> KV cache 25GB+
                         # Force explicit safe contexts first (dual T4 = ~30GB usable total)
                         loaded = False
-                        for ctx in ["--context-length 16384", "--context-length 8192", "--context-length 4096", ""]:
+                        # 64K OOMs on dual T4 (unable to allocate CUDA0 buffer); 48K is the safe ceiling.
+                        for ctx in ["--context-length 49152", "--context-length 32768", "--context-length 16384", ""]:
                             suffix = f" (ctx{ctx.split()[-1]})" if ctx else " (model default - last resort)"
                             if run(f'lms load "{key}" -y --gpu max {ctx}'):
                                 loaded = True
@@ -431,7 +468,7 @@ def main():
                 "model_path": gguf,
                 "llama_cpp_runtime": "default",
                 "parameters": {
-                    "ctx_size": 16384,
+                    "ctx_size": 49152,
                     "gpu_layers": 99,
                     "flash-attn": True,
                     "cache-type-k": "q8_0",
@@ -455,7 +492,7 @@ def main():
                 for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                     m = j["provider"][prov].setdefault("models", {})
                     m.clear()
-                    m[alias] = {"name": alias, "tool_call": True, "limit": {"context": 16384, "output": 8192}}
+                    m[alias] = {"name": alias, "tool_call": True, "limit": {"context": 49152, "output": 32768}}
                 open(pj, "w").write(_json.dumps(j, indent=2))
             except Exception:
                 pass
@@ -481,7 +518,25 @@ def main():
     if not DOMAIN_SERVED and shutil.which("lms"):
         run_bg("lms server start --port 1234 --cors", "lmstudio:1234")
         if wait_http("http://localhost:1234/v1/models", name="LM Studio :1234"):
-            pass
+            # Correct opencode.json model id to the identifier LM Studio actually serves.
+            # lms loads the GGUF under a cleaned id (e.g. qwen3-coder-30b-a3b-instruct),
+            # not the HF repo name; otherwise OpenCode requests a model that 404s.
+            try:
+                import json as _json
+                _mdl = _json_loads_url("http://localhost:1234/v1/models").get("data", [])
+                _served = _mdl[0]["id"] if _mdl else None
+                if _served:
+                    pj = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
+                    j = _json.load(open(pj))
+                    for prov in ["lmstudio-local", "lmstudio-tunneled"]:
+                        m = j["provider"][prov].setdefault("models", {})
+                        m.clear()
+                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                    open(pj, "w").write(_json.dumps(j, indent=2))
+                    served_model = _served
+                    print(f"Patched opencode.json model id -> {_served}", flush=True)
+            except Exception as e:
+                print(f"opencode.json model-id patch skipped: {e}", flush=True)
         else:
             print("--- last 15 lines of LM Studio log ---", flush=True)
             try:
@@ -496,6 +551,40 @@ def main():
     for port in [2456, 3000]:
         run(f"fuser -k {port}/tcp 2>/dev/null || true")
     time.sleep(1)
+    # Make the OpenCode config discoverable by ALL instances. OpenChamber launches its
+    # own managed OpenCode with cwd=/root (and the web instance with cwd=/kaggle/working),
+    # so neither ever sees this repo's opencode.json (OpenCode only searches cwd + ancestors).
+    # Copying into ~/.config/opencode makes providers available everywhere.
+    try:
+        import json as _json, shutil as _shutil
+        src = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
+        if os.path.exists(src):
+            cfg = _json.load(open(src))
+            # point the tunneled provider at the real domain (config ships with a placeholder)
+            if "lmstudio-tunneled" in cfg.get("provider", {}):
+                cfg["provider"]["lmstudio-tunneled"]["options"]["baseURL"] = f"https://ai.{DOMAIN}/v1"
+            # Final safety net: set the model id to whatever LM Studio actually serves, so
+            # OpenCode never requests a model id that 404s (covers lms + llama-runner paths).
+            try:
+                _models = _json_loads_url("http://localhost:1234/v1/models").get("data", [])
+                _served = _models[0]["id"] if _models else None
+                if _served:
+                    for prov in ["lmstudio-local", "lmstudio-tunneled"]:
+                        m = cfg["provider"][prov].setdefault("models", {})
+                        m.clear()
+                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                    print(f"opencode model id corrected -> {_served}", flush=True)
+                    served_model = _served
+            except Exception as e:
+                print(f"model-id correction skipped (LM Studio not reachable?): {e}", flush=True)
+            dst_dir = os.path.expanduser("~/.config/opencode")
+            os.makedirs(dst_dir, exist_ok=True)
+            dst = os.path.join(dst_dir, "opencode.jsonc")
+            _json.dump(cfg, open(dst, "w"), indent=2)
+            print(f"Copied opencode config -> {dst} (tunneled baseURL https://ai.{DOMAIN}/v1)", flush=True)
+    except Exception as e:
+        print(f"opencode config copy skipped: {e}", flush=True)
+
     if shutil.which("opencode"):
         os.environ["OPENCODE_SERVER_PASSWORD"] = PASSWORD  # secure opencode web (fixes unsecured warning)
         run_bg(f'opencode web --port 2456 --hostname 0.0.0.0', "opencode:2456")
@@ -570,6 +659,30 @@ ingress:
         print(f"AI: https://ai.{DOMAIN}/v1  OC: https://oc.{DOMAIN}  Chamber: https://chamber.{DOMAIN}  SSH: ssh.{DOMAIN}", flush=True)
     else:
         print("cloudflared missing, install via: curl -fsSL https://pkg.cloudflare.com/cloudflared | sh", flush=True)
+
+    # ---- Clean connection summary (printed in Python) ----
+    ui_pw = PASSWORD if PASSWORD != "changeme" else "(unset - set OPENCHAMBER_UI_PASSWORD)"
+    ssh_pw = SSH_PASSWORD if (SSH_PASSWORD and SSH_PASSWORD.strip()) else ui_pw
+    model_line = served_model or MODEL
+    bar = "=" * 64
+    print("\n" + bar)
+    print("  HOST STACK READY")
+    print(bar)
+    print(f"  Model (HF)     : {MODEL}")
+    print(f"  Quant          : {MODEL_QUANT}  (override via MODEL_QUANT)")
+    print(f"  Model (served) : {model_line}")
+    print(f"  Context / Out  : 48K / 32K tokens  (64K OOMs on dual T4)")
+    print("-" * 64)
+    print("  CONNECT")
+    print(f"   OpenCode Web  : https://oc.{DOMAIN}   (password: {ui_pw})")
+    print(f"   OpenChamber   : https://chamber.{DOMAIN}  (password: {ui_pw})")
+    print(f"   AI endpoint   : https://ai.{DOMAIN}/v1")
+    print(f"   SSH           : ssh root@ssh.{DOMAIN}   (password: {ssh_pw})")
+    print(f"   SSH (1-liner) : ssh-keygen -R ssh.{DOMAIN} && ssh -o StrictHostKeyChecking=no root@ssh.{DOMAIN}")
+    print(f"   Local         : opencode :2456 | openchamber :3000 | lmstudio :1234")
+    print("-" * 64)
+    print(f"  LOGS: service logs in /tmp/<name>.log (e.g. /tmp/lmstudio:1234.log, /tmp/opencode:2456.log)")
+    print(bar + "\n")
 
     print("All services started. Keepalive monitor running (checks every 30s)... Ctrl+C to stop.", flush=True)
     SERVICES = [
