@@ -219,23 +219,28 @@ def main():
         print("lms not found, skipping model pull (install LM Studio first)", flush=True)
 
     # 2. Start services
-    procs = []
+    # lms/openchamber are daemon-managed: their CLI returns immediately (code 0) while daemon serves.
+    # Only cloudflared tunnels are long-lived processes worth monitoring.
+    tunnels = []
     if shutil.which("lms"):
-        # lms server start does not support --gpu/--jinja, use plain
-        procs.append(run_bg("lms server start --port 1234 --cors", "lmstudio:1234"))
+        run_bg("lms server start --port 1234 --cors", "lmstudio:1234")
+        time.sleep(2)
+        if run("curl -s -m 5 http://localhost:1234/v1/models >/dev/null"):
+            print("LM Studio API up on :1234", flush=True)
+        else:
+            print("LM Studio API not responding yet (model may still be downloading)", flush=True)
     else:
         print("lms missing", flush=True)
 
-    time.sleep(2)
+    time.sleep(1)
     if shutil.which("opencode"):
-        procs.append(run_bg("opencode web --port 2456 --hostname 0.0.0.0", "opencode:2456"))
+        os.environ["OPENCODE_SERVER_PASSWORD"] = PASSWORD  # secure opencode web (fixes unsecured warning)
+        run_bg(f'opencode web --port 2456 --hostname 0.0.0.0', "opencode:2456")
     else:
         print("opencode missing, install via: curl -fsSL https://opencode.ai/install | bash", flush=True)
 
     if shutil.which("openchamber"):
-        procs.append(run_bg("openchamber --ui-password \"$OPENCHAMBER_UI_PASSWORD\"", "openchamber:3000"))
-    else:
-        print("openchamber missing, install via: curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash", flush=True)
+        run_bg('openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', "openchamber:3000")
 
     time.sleep(3)
 
@@ -265,7 +270,7 @@ ingress:
         is_jwt = TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("eyJ") and TUNNEL_TOKEN.count(".") >= 2
         if TUNNEL_TOKEN and is_jwt:
             print(f"Using TUNNEL_TOKEN (Zero Trust JWT) for {TUNNEL} ...", flush=True)
-            procs.append(run_bg(f"cloudflared tunnel run --token {TUNNEL_TOKEN}", "cloudflared"))
+            tunnels.append(run_bg(f"cloudflared tunnel run --token {TUNNEL_TOKEN}", "cloudflared"))
         elif TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("cfut_"):
             # cfut_ API token in headless Kaggle has no cert.pem -> use quick tunnels (trycloudflare.com) as fallback
             cert = os.path.expanduser("~/.cloudflared/cert.pem")
@@ -278,19 +283,19 @@ ingress:
                 for sub in ["ai", "oc", "chamber", "ssh"]:
                     run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
                 print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
-                procs.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
+                tunnels.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
             else:
                 print(f"TUNNEL_TOKEN is cfut_ but no cert.pem (headless Kaggle) -> using quick tunnels (trycloudflare.com) for each port", flush=True)
                 # quick tunnels need no cert/domain, one per service
                 for sub, port in [("ai", 1234), ("oc", 2456), ("chamber", 3000)]:
-                    procs.append(run_bg(f"cloudflared tunnel --url http://localhost:{port} 2>&1 | sed -u 's/^/[{sub}]/'", f"cloudflared-{sub}"))
+                    tunnels.append(run_bg(f"cloudflared tunnel --url http://localhost:{port} 2>&1 | sed -u 's/^/[{sub}]/'", f"cloudflared-{sub}"))
                 print(f"Quick tunnels started for ai:1234 oc:2456 chamber:3000 (check logs for https://*.trycloudflare.com URLs)", flush=True)
         else:
             run(f"cloudflared tunnel create {TUNNEL} || true")
             for sub in ["ai", "oc", "chamber", "ssh"]:
                 run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
             print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
-            procs.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
+            tunnels.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
         print(f"AI: https://ai.{DOMAIN}/v1  OC: https://oc.{DOMAIN}  Chamber: https://chamber.{DOMAIN}  SSH: ssh.{DOMAIN}", flush=True)
     else:
         print("cloudflared missing, install via: curl -fsSL https://pkg.cloudflare.com/cloudflared | sh", flush=True)
@@ -299,12 +304,12 @@ ingress:
     try:
         while True:
             time.sleep(10)
-            for p in procs:
+            for p in tunnels:
                 if p.poll() is not None:
                     print(f"Process exited: {p.args} code={p.returncode}", flush=True)
     except KeyboardInterrupt:
         print("Stopping...", flush=True)
-        for p in procs:
+        for p in tunnels:
             p.terminate()
 
 if __name__ == "__main__":
