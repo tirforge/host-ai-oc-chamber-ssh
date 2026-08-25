@@ -63,7 +63,7 @@ def wait_http(url, tries=12, delay=5, name=""):
     for i in range(tries):
         r = subprocess.run(f"curl -s -m 4 -o /dev/null -w '%{{http_code}}' {url}", shell=True, capture_output=True, text=True)
         code = r.stdout.strip()
-        if code.startswith("2"):
+        if code.startswith("2") or code in ("401", "403"):  # 401 = up, auth required
             print(f"{name or url}: UP ({code}) after {(i+1)*delay}s", flush=True)
             return True
         time.sleep(delay)
@@ -472,9 +472,10 @@ ingress:
             status = []
             for nm, url, cmd, port in SERVICES:
                 c = subprocess.run(f"curl -s -m 5 -o /dev/null -w '%{{http_code}}' {url}", shell=True, capture_output=True, text=True).stdout.strip()
-                ok = c.startswith("2")
+                ok = c.startswith("2") or c in ("401", "403")  # 401 = up + auth required (opencode)
                 if last.get(nm) != ok:
-                    print(f"[{time.strftime('%H:%M:%S')}] {nm}: {'UP' if ok else 'DOWN'} (http {c})", flush=True)
+                    tag = "UP (auth)" if c in ("401", "403") else ("UP" if ok else "DOWN")
+                    print(f"[{time.strftime('%H:%M:%S')}] {nm}: {tag} (http {c})", flush=True)
                 last[nm] = ok
                 status.append(f"{nm.split(' :')[1].strip(':')}={'OK' if ok else 'DOWN'}")
                 # auto-restart service after 2 consecutive DOWNs
