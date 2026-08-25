@@ -219,10 +219,15 @@ def main():
                 os.makedirs(dest, exist_ok=True)
                 run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" </dev/null) || true')
                 import glob as _g
-                ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"))
+                ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
                 if ggufs:
-                    print(f"Downloaded {len(ggufs)} GGUF file(s) to {dest} - LM Studio will auto-discover on server start", flush=True)
+                    print(f"Downloaded {len(ggufs)} GGUF file(s) -> {dest}", flush=True)
                     run("lms daemon up || true")
+                    # load model so /v1/models lists it
+                    g0 = sorted(ggufs, key=len)[0]  # smallest = often not main; prefer largest
+                    g0 = max(ggufs, key=os.path.getsize)
+                    print(f"Loading {os.path.basename(g0)}...", flush=True)
+                    run(f'lms load "{g0}" -y --gpu max || lms load "{g0}" -y || lms load "{os.path.basename(g0)}" -y || true')
                 else:
                     print("HF direct download failed too - server will start with no model; set MODEL secret to a valid HF GGUF repo", flush=True)
     else:
