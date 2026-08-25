@@ -38,7 +38,7 @@ def test_dual_t4_config():
 
 def test_host_sh_model_var():
     txt = open("scripts/host.sh").read()
-    assert 'MODEL=${MODEL:-lmstudio-community/Qwen3-Coder-30B-A3B-GGUF}' in txt
+    assert 'MODEL=${MODEL:-lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF}' in txt
     assert 'opencode web --port 2456' in txt
     assert 'lms get "$base"' in txt
     assert 'lms daemon up' in txt

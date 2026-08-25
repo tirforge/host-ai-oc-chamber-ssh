@@ -1,6 +1,6 @@
 {
   "gpu": "dual T4 (2x16GB, SM75, no BF16, PCIe, no NVLink)",
-  "target_model": "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M",
+  "target_model": "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF",
   "quantization": "Q4_K_M (~18GB) fits 32GB with 12-14GB KV headroom; Q6_K (~22GB) for max quality still >50 tok/s active",
   "lmstudio": {
     "context_length": 32768,
@@ -16,7 +16,7 @@
     "subdomains": ["ai", "oc", "chamber", "ssh"]
   },
   "opencode": {
-    "model": "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M",
+    "model": "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF",
     "tool_call": true,
     "reasoning": true,
     "port": 2456

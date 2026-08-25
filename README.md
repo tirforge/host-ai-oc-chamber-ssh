@@ -13,7 +13,7 @@ Single `cloudflared` named tunnel with 4 subdomains, Python host-receiver, your 
 
 * All 4 ingress in one `t4host` tunnel + catch-all `http_status:404`
 * `opencode.json`: both `lmstudio-local` and `lmstudio-tunneled` have `qwen3-coder-30b-a3b` `tool_call:true` `reasoning:true` `limit:32768/8192`, plugin `opencode-lmstudio@1.0.0-rc.2`
-* Default model `lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M` auto-pulled via `lms get` if `MODEL` secret missing, else uses your `MODEL` (Kaggle + env, strip-empty, `MODEL_NAME` fallback, patches `opencode.json`)
+* Default model `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF` auto-pulled via `lms get` if `MODEL` secret missing, else uses your `MODEL` (Kaggle + env, strip-empty, `MODEL_NAME` fallback, patches `opencode.json`)
 * Dual T4 wiring: `gpu/dual-t4.json` `Q4_K_M ~18GB` `CUDA_VISIBLE_DEVICES=0,1` `MTP --spec-type draft-mtp` `32k ctx` (not 262k)
 * Enhanced: `harnesses/smallcode` submodule `mebassett/smallcode` 18-tool forgiving parser, `scripts/run-smallcode.sh` fallback
 * `python -m py_compile` + `bash -n` pass
@@ -31,7 +31,7 @@ Single `cloudflared` named tunnel with 4 subdomains, Python host-receiver, your 
 * Opencode: `curl -fsSL https://opencode.ai/install | bash` https://github.com/anomalyco/opencode
 * OpenChamber: `curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash` https://github.com/openchamber/openchamber
 * cloudflared: https://github.com/cloudflare/cloudflared/releases
-* Model (default A3B): `lms get lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M -y` or HF https://huggingface.co/lmstudio-community/Qwen3-Coder-30B-A3B-GGUF and https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct
+* Model (default A3B): `lms get lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF` or HF https://huggingface.co/lmstudio-community/Qwen3-Coder-30B-A3B-GGUF and https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct
 * Enhanced harness: vendored `harnesses/smallcode` https://github.com/mebassett/smallcode
 
 ## Quick Start (Host = dual T4, non-Docker)
@@ -50,8 +50,8 @@ cloudflared tunnel route dns t4host chamber.yourdomain.com
 cloudflared tunnel route dns t4host ssh.yourdomain.com
 cp cloudflared/config.yml ~/.cloudflared/config.yml  # edit <TUNNEL_ID> + yourdomain.com
 cloudflared tunnel run t4host
-# 3. Run (auto-pulls lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M if MODEL not set)
-MODEL=lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M ./scripts/host.sh yourdomain.com
+# 3. Run (auto-pulls lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF if MODEL not set)
+MODEL=lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF ./scripts/host.sh yourdomain.com
 # or: MODEL=mistralai/devstral-small-2507 ./scripts/host.sh yourdomain.com t4host
 ```
 
@@ -64,14 +64,14 @@ Add Secrets in Kaggle Notebook: `Add-ons -> Secrets` and toggle on for this note
 * `CF_DOMAIN` - `yourdomain.com` (your Cloudflare domain)
 * `OPENCHAMBER_UI_PASSWORD` (or `PASSWORD`) - WebUI password for `oc` + `chamber`
 * `SSH_PASSWORD` (or `SSH_PASS`) - **SSH password** for `ssh.yourdomain.com` (sets Linux `root` + current user via `chpasswd`, tune via env)
-* `MODEL` (optional, default `lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M` A3B - if secret missing -> default, if set like `mistralai/devstral-small-2507` -> pulls that)
+* `MODEL` (optional, default `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF` A3B - if secret missing -> default, if set like `mistralai/devstral-small-2507` -> pulls that)
 * `TUNNEL_TOKEN` (optional alternative to `CF_TOKEN` for headless Kaggle where `cloudflared tunnel login` browser is impossible)
 
 Cell (Kaggle, with Internet + GPU) - handles existing dir, no pip install needed (`kaggle_secrets` preinstalled):
 ```python
 !rm -rf host-ai-oc-chamber-ssh; git clone --recurse-submodules https://github.com/tirforge/host-ai-oc-chamber-ssh
 !python host-ai-oc-chamber-ssh/scripts/startup.py
-# MODEL not set -> pulls lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M (55-70 tok/s on dual T4), if you set MODEL=... in Secrets it pulls that and patches opencode.json tool_call:true
+# MODEL not set -> pulls lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF (55-70 tok/s on dual T4), if you set MODEL=... in Secrets it pulls that and patches opencode.json tool_call:true
 ```
 
 `scripts/startup.py` handles both: `os.environ` and `kaggle_secrets.UserSecretsClient` (`secret_value_0..5` format you requested), strip-empty, `MODEL`/`MODEL_NAME` fallback, `TUNNEL_TOKEN` (eyJ JWT) vs `CF_TOKEN`/`cfut_` API token branching, `~/.cloudflared` via `expanduser`, auto-installs `lms`/`cloudflared`/`opencode`/`openchamber` (Node 22 via fnm/nvm if needed), dual T4 auto-detect `CUDA_VISIBLE_DEVICES=0,1`.

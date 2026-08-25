@@ -10,7 +10,7 @@ Env secrets (set in Kaggle Secrets -> Add-ons -> Secrets):
   CF_DOMAIN / CLOUDFLARE_DOMAIN / DOMAIN  (e.g. aaruvi.space)
   OPENCHAMBER_UI_PASSWORD / UI_PASSWORD / PASSWORD
   SSH_PASSWORD / SSH_PASS (for ssh.yourdomain.com via cloudflared, sets Linux password for root/current user)
-  MODEL  (default: lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M - use HF repo or LM Studio ID, not qwen/qwen3-coder-30b-a3b)
+  MODEL  (default: lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF)
   TUNNEL_NAME (default: t4host)
   LM_API_TOKEN (optional, for ai subdomain auth)
 
@@ -103,13 +103,13 @@ def main():
     # SSH password: SSH_PASSWORD -> SSH_PASS -> fallback to OpenChamber UI password
     SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD") or PASSWORD
     # MODEL: if secret not present -> default, if passed -> use that (no :QUANT - llmster regex rejects colon; use HF repo id)
-    MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF"
+    MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
     if not MODEL or not MODEL.strip():
         MODEL = MODEL_DEFAULT
     MODEL = MODEL.strip()
     # map old aliases to valid HF repo (fixes Kaggle artifact not found)
-    if MODEL in ["qwen/qwen3-coder-30b-a3b", "qwen3-coder-30b-a3b", "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"]:
+    if MODEL in ["qwen/qwen3-coder-30b-a3b", "qwen3-coder-30b-a3b", "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF", "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"]:
         print(f"Mapping alias {MODEL} -> {MODEL_DEFAULT}", flush=True)
         MODEL = MODEL_DEFAULT
     TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
@@ -217,7 +217,7 @@ def main():
                 print("lms get failed -> direct HF download into ~/.lmstudio/models ...", flush=True)
                 dest = os.path.expanduser(f"~/.lmstudio/models/{base}")
                 os.makedirs(dest, exist_ok=True)
-                run(f'huggingface-cli download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" || pip install -q -U "huggingface_hub[cli]" && huggingface-cli download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" || true')
+                run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" </dev/null) || true')
                 import glob as _g
                 ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"))
                 if ggufs:
