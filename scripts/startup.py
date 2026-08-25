@@ -113,7 +113,6 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
         if not aid:
             print("CF API: no account access - check token perms", flush=True)
             return None
-        aid = acc["result"][0]["id"]
         # 2. create tunnel (remote-managed); reuse if name exists
         t = api("POST", f"/accounts/{aid}/cfd_tunnel", {"name": tunnel_name, "config_src": "cloudflare"})
         tid = None
@@ -345,7 +344,10 @@ def main():
                                 break
                             print(f"load failed {suffix} - trying smaller...", flush=True)
                         if not loaded:
-                            print("All load attempts OOMed - set MODEL to a smaller GGUF (e.g. lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF)", flush=True)
+                            # llmster headless often fails multi-GPU split (bug tracker #1360/#1365:
+                            # "tensor split 0 -> disabling GPU", or all weights on CUDA0 -> OOM)
+                            os.environ["LMS_LOAD_FAILED"] = "1"
+                            print("All lms load attempts OOMed - will fall back to Ollama engine (proper multi-GPU split)", flush=True)
                     else:
                         g0 = max(ggufs, key=os.path.getsize)
                         print(f"Key not found via lms ls; relying on JIT auto-load of {os.path.basename(g0)}", flush=True)
@@ -358,7 +360,55 @@ def main():
     # lms/openchamber are daemon-managed: their CLI returns immediately (code 0) while daemon serves.
     # Only cloudflared tunnels are long-lived processes worth monitoring.
     tunnels = []
-    if shutil.which("lms"):
+
+    def deploy_ollama():
+        """Ollama engine fallback: proper multi-GPU split via OLLAMA_SCHED_SPREAD, serves /v1 on 1234."""
+        print("=== Falling back to Ollama engine (multi-GPU spread) ===", flush=True)
+        if not shutil.which("ollama"):
+            run("curl -fsSL https://ollama.com/install.sh | sh || true")
+        run("fuser -k 1234/tcp 2>/dev/null || true")  # free port from lms server
+        time.sleep(1)
+        env_line = "OLLAMA_HOST=0.0.0.0:1234 OLLAMA_SCHED_SPREAD=1 OLLAMA_CONTEXT_LENGTH=8192"
+        procs_local = [run_bg(f"{env_line} ollama serve", "ollama:1234")]
+        wait_http("http://localhost:1234/v1/models", tries=6, name="Ollama :1234")
+        # ladder: prefer coder MoE, then smaller dense that definitely fits
+        for tag in ["qwen3-coder:30b-a3b-instruct", "qwen2.5-coder:14b-instruct", "qwen2.5-coder:7b-instruct"]:
+            print(f"ollama pull {tag} ...", flush=True)
+            if not run(f"ollama pull {tag}"):
+                continue
+            r = subprocess.run(
+                f"curl -s -m 120 -o /tmp/ollama_warm.json -w '%{{http_code}}' "
+                f"-X POST http://localhost:1234/v1/chat/completions -H 'Content-Type: application/json' "
+                f"-d '{{\"model\":\"{tag}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}],\"max_tokens\":5}}'",
+                shell=True, capture_output=True, text=True)
+            code = r.stdout.strip()
+            body = open("/tmp/ollama_warm.json").read()[:300] if os.path.exists("/tmp/ollama_warm.json") else ""
+            if code.startswith("2") and '"error"' not in body:
+                print(f"OLLAMA ENGINE UP: model={tag} on http://localhost:1234/v1", flush=True)
+                # patch opencode.json with the ollama tag
+                try:
+                    import json as _json
+                    pj = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
+                    j = _json.load(open(pj))
+                    for prov in ["lmstudio-local", "lmstudio-tunneled"]:
+                        m = j["provider"][prov].setdefault("models", {})
+                        m.clear()  # lms keys invalid under ollama
+                        m[tag] = {"name": tag, "tool_call": True, "limit": {"context": 8192, "output": 4096}}
+                    open(pj, "w").write(_json.dumps(j, indent=2))
+                except Exception:
+                    pass
+                return procs_local
+            print(f"{tag} failed to load (http {code}) {body[:150]} - trying smaller...", flush=True)
+        print("Ollama ladder exhausted", flush=True)
+        return procs_local
+
+    if os.environ.get("LMS_LOAD_FAILED") == "1":
+        tunnels.extend(deploy_ollama())
+        DOMAIN_SERVED = True
+    else:
+        DOMAIN_SERVED = False
+
+    if not DOMAIN_SERVED and shutil.which("lms"):
         run_bg("lms server start --port 1234 --cors", "lmstudio:1234")
         if wait_http("http://localhost:1234/v1/models", name="LM Studio :1234"):
             pass
