@@ -122,9 +122,14 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
         if z.get("success") and z["result"]:
             zid = z["result"][0]["id"]
             for sub in ["ai", "oc", "chamber", "ssh"]:
-                body = {"type": "CNAME", "name": f"{sub}.{domain}", "content": f"{tid}.cfargotunnel.com", "proxied": True}
+                fqdn = f"{sub}.{domain}"
+                existing = api("GET", f"/zones/{zid}/dns_records?type=CNAME&name={fqdn}")
+                if existing.get("success") and existing["result"]:
+                    print(f"DNS {fqdn}: already exists (reused)", flush=True)
+                    continue
+                body = {"type": "CNAME", "name": fqdn, "content": f"{tid}.cfargotunnel.com", "proxied": True}
                 r = api("POST", f"/zones/{zid}/dns_records", body)
-                print(f"DNS {sub}.{domain}: {'created' if r.get('success') else r.get('errors')}", flush=True)
+                print(f"DNS {fqdn}: {'created' if r.get('success') else r.get('errors')}", flush=True)
         else:
             print(f"Zone {domain} not found on this token's account - create CNAMEs manually -> {tid}.cfargotunnel.com", flush=True)
         print(f"Tunnel {tunnel_name} ({tid}) ready - run token obtained", flush=True)
