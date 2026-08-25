@@ -8,7 +8,7 @@ for _p in "$HOME/.local/share/fnm/aliases/default/bin" $HOME/.nvm/versions/node/
 
 DOMAIN=${1:-yourdomain.com}
 TUNNEL=${2:-t4host}
-MODEL=${MODEL:-lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M}
+MODEL=${MODEL:-lmstudio-community/Qwen3-Coder-30B-A3B-GGUF}
 # also allow positional 3rd arg as model
 if [ -n "$3" ]; then MODEL="$3"; fi
 
@@ -32,9 +32,14 @@ if [ "$MODEL" = "qwen/qwen3-coder-30b-a3b" ] || [ "$MODEL" = "qwen3-coder-30b-a3
   MODEL="lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
 fi
 
-echo "Pulling model $MODEL (default: lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M) if missing..."
+echo "Pulling model $MODEL (default: lmstudio-community/Qwen3-Coder-30B-A3B-GGUF) if missing..."
 lms daemon up || true
-lms get "$MODEL" -y || lms get "$MODEL" || lms get lmstudio-community/Qwen3-Coder-30B-A3B-GGUF -y || echo "lms get $MODEL failed, check LM Studio catalog"
+base="${MODEL%%:*}"  # llmster rejects ':QUANT'
+if ! lms get "$base" -y && ! lms get "$base"; then
+  echo "lms get failed -> direct HF download into ~/.lmstudio/models ..."
+  _dest="$HOME/.lmstudio/models/$base"; mkdir -p "$_dest"
+  huggingface-cli download "$base" --include "*Q4_K_M*" --local-dir "$_dest" || echo "HF direct failed"
+fi
 echo "Starting LM Studio..."
 lms server start --port 1234 --cors &
 echo "Starting Opencode Web (full tool support, port 2456)..."

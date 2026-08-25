@@ -101,16 +101,16 @@ def main():
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
     SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD")
-    # MODEL: if secret not present -> default, if passed -> use that (use HF repo for lms, e.g. lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M)
-    MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
+    # MODEL: if secret not present -> default, if passed -> use that (no :QUANT - llmster regex rejects colon; use HF repo id)
+    MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
     if not MODEL or not MODEL.strip():
         MODEL = MODEL_DEFAULT
     MODEL = MODEL.strip()
-    # map old alias to valid HF repo (fixes Kaggle qwen/qwen3-coder-30b-a3b not found)
-    if MODEL in ["qwen/qwen3-coder-30b-a3b", "qwen3-coder-30b-a3b"]:
-        print(f"Mapping alias {MODEL} -> lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M", flush=True)
-        MODEL = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
+    # map old aliases to valid HF repo (fixes Kaggle artifact not found)
+    if MODEL in ["qwen/qwen3-coder-30b-a3b", "qwen3-coder-30b-a3b", "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"]:
+        print(f"Mapping alias {MODEL} -> {MODEL_DEFAULT}", flush=True)
+        MODEL = MODEL_DEFAULT
     TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
 
     if not DOMAIN:
@@ -200,12 +200,21 @@ def main():
             pass
         print(f"Pulling model {MODEL}...", flush=True)
         run("lms daemon up || true")
-        # try requested model, fallback to known good
-        if not run(f'lms get {MODEL} -y'):
-            run(f'lms get {MODEL} || true')
-        # fallback if still no model - try known tiny model that exists in older catalog
-        for fb in ["lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M", "qwen2.5-coder-7b-instruct", "tinyllama"]:
-            run(f'lms get {fb} -y || true')
+        base = MODEL.split(":")[0]  # llmster regex rejects ':QUANT' suffix
+        # try base repo id first, then full, then direct HuggingFace download into LM Studio models dir (auto-discovered)
+        if not run(f'lms get "{base}" -y'):
+            if not run(f'lms get "{base}"'):
+                print("lms get failed -> direct HF download into ~/.lmstudio/models ...", flush=True)
+                dest = os.path.expanduser(f"~/.lmstudio/models/{base}")
+                os.makedirs(dest, exist_ok=True)
+                run(f'huggingface-cli download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" || pip install -q -U "huggingface_hub[cli]" && huggingface-cli download "{base}" --include "*Q4_K_M*" --local-dir "{dest}" || true')
+                import glob as _g
+                ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"))
+                if ggufs:
+                    print(f"Downloaded {len(ggufs)} GGUF file(s) to {dest} - LM Studio will auto-discover on server start", flush=True)
+                    run("lms daemon up || true")
+                else:
+                    print("HF direct download failed too - server will start with no model; set MODEL secret to a valid HF GGUF repo", flush=True)
     else:
         print("lms not found, skipping model pull (install LM Studio first)", flush=True)
 
