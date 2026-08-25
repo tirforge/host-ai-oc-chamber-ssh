@@ -382,8 +382,15 @@ ingress:
         elif TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("cfut_"):
             # cfut_ = API token. Headless Kaggle has no cert.pem for `tunnel create`.
             # Use Cloudflare REST API to create named tunnel + ingress + DNS, then run with returned JWT.
-            api_tok = CF_TOKEN or TUNNEL_TOKEN
-            jwt = cf_api_named_tunnel(api_tok, DOMAIN, TUNNEL)
+            jwt = None
+            tried = []
+            for cand in [CF_TOKEN, TUNNEL_TOKEN]:
+                if cand and cand not in tried:
+                    tried.append(cand[:12] + "...")
+                    print(f"Trying CF API with token {cand[:12]}...", flush=True)
+                    jwt = cf_api_named_tunnel(cand, DOMAIN, TUNNEL)
+                    if jwt:
+                        break
             if jwt:
                 print(f"Using API-created tunnel run token for {TUNNEL} ...", flush=True)
                 tunnels.append(run_bg(f"cloudflared tunnel run --token {jwt}", "cloudflared"))
