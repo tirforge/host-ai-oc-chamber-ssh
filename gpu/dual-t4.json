@@ -1,0 +1,30 @@
+{
+  "gpu": "dual T4 (2x16GB, SM75, no BF16, PCIe, no NVLink)",
+  "target_model": "qwen/qwen3-coder-30b-a3b",
+  "quantization": "Q4_K_M (~18GB) fits 32GB with 12-14GB KV headroom; Q6_K (~22GB) for max quality still >50 tok/s active",
+  "lmstudio": {
+    "context_length": 32768,
+    "gpu_offload": "max",
+    "flash_attention": true,
+    "mtp": "--spec-type draft-mtp (MTP draft head, 2x speed)",
+    "jinja": true,
+    "parallel": 1,
+    "notes": "LM Studio auto-splits layers across both T4s via CUDA_VISIBLE_DEVICES=0,1. Keep ctx 32k, not 262k, or KV OOMs."
+  },
+  "cloudflared": {
+    "tunnel": "t4host",
+    "subdomains": ["ai", "oc", "chamber", "ssh"]
+  },
+  "opencode": {
+    "model": "qwen3-coder-30b-a3b",
+    "tool_call": true,
+    "reasoning": true,
+    "port": 2456
+  },
+  "smallcode_fallback": {
+    "enabled": true,
+    "endpoint": "http://localhost:1234/v1",
+    "context_budget": "70%",
+    "max_tool_result_chars": 8000
+  }
+}

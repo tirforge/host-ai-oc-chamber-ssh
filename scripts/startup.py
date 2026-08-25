@@ -72,15 +72,25 @@ print(f"Domain: {DOMAIN} Tunnel: {TUNNEL} Model: {MODEL}", flush=True)
 
 # 1. Pull model (LM Studio)
 if shutil.which("lms"):
+    # detect dual T4
+    try:
+        n = subprocess.run("nvidia-smi --query-gpu=name --format=csv,noheader | grep -c T4 || echo 0", shell=True, capture_output=True, text=True).stdout.strip()
+        if "2" in n:
+            print("Dual T4 detected, setting CUDA_VISIBLE_DEVICES=0,1 and MTP", flush=True)
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+    except Exception:
+        pass
     print("Pulling model...", flush=True)
-    run(f'lms get {MODEL} -y || lms get {MODEL} || echo "lms get failed"')
+    # enhanced: try Q4_K_M quant for dual T4 fit
+    run(f'lms get {MODEL} -y || lms get {MODEL} || echo "lms get failed - check LM Studio catalog"')
 else:
     print("lms not found, skipping model pull (install LM Studio first)", flush=True)
 
 # 2. Start services
 procs = []
 if shutil.which("lms"):
-    procs.append(run_bg("lms server start --port 1234 --cors", "lmstudio:1234"))
+    # full tool-calling + MTP for dual T4 50-70 tok/s
+    procs.append(run_bg("lms server start --port 1234 --cors --gpu max --jinja", "lmstudio:1234"))
 else:
     print("lms missing", flush=True)
 

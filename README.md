@@ -38,9 +38,12 @@ cloudflared tunnel run t4host
 ```
 
 ## Files
-- `cloudflared/config.yml` - template with 4 ingress rules
+- `cloudflared/config.yml` - template with 4 ingress rules (ai:1234 oc:2456 chamber:3000 ssh:22)
 - `scripts/host.sh` - starts lms + opencode web + openchamber + cloudflared
-- `opencode.json` - provider points to local LM Studio (ai subdomain for remote)
+- `scripts/startup.py` - Kaggle/env startup, reads CF_TOKEN/CF_DOMAIN/PASSWORD/MODEL from env/Kaggle Secrets, auto-pulls qwen3-coder-30b-a3b, detects dual T4
+- `opencode.json` - provider points to local LM Studio (ai subdomain for remote), tool_call:true, reasoning:true
 - `scripts/setup-tunnel.sh` - creates + routes DNS for 4 hostnames
+- `enhanced/README.md` - combined enhanced tool calling (opencode-lmstudio + smallcode fallback)
+- `gpu/dual-t4.json` + `gpu/dual-t4.md` - dual T4 wiring (Q4_K_M, MTP, 32k ctx, CUDA_VISIBLE_DEVICES=0,1)
 
 See `scripts/host.sh` for systemd alternative.
