@@ -324,6 +324,7 @@ def main():
                 ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
                 if ggufs:
                     print(f"Downloaded {len(ggufs)} GGUF file(s) -> {dest}", flush=True)
+                    os.environ["GGUF_PATH"] = max(ggufs, key=os.path.getsize)  # for llama.cpp fallback
                     run("lms daemon up || true")
                     # trigger scan then load by discovered model key
                     ls = subprocess.run("lms ls", shell=True, capture_output=True, text=True).stdout
@@ -361,49 +362,69 @@ def main():
     # Only cloudflared tunnels are long-lived processes worth monitoring.
     tunnels = []
 
-    def deploy_ollama():
-        """Ollama engine fallback: proper multi-GPU split via OLLAMA_SCHED_SPREAD, serves /v1 on 1234."""
-        print("=== Falling back to Ollama engine (multi-GPU spread) ===", flush=True)
-        if not shutil.which("ollama"):
-            run("curl -fsSL https://ollama.com/install.sh | sh || true")
-        run("fuser -k 1234/tcp 2>/dev/null || true")  # free port from lms server
+    def deploy_llamacpp():
+        """Raw llama.cpp llama-server: explicit multi-GPU split across BOTH T4s, /v1 on 1234."""
+        print("=== Falling back to raw llama.cpp llama-server (explicit dual-T4 split) ===", flush=True)
+        gguf = os.environ.get("GGUF_PATH")
+        if not gguf:
+            print("No GGUF path known - cannot start llama-server", flush=True)
+            return []
+        bindir = os.path.expanduser("~/.local/bin")
+        os.makedirs(bindir, exist_ok=True)
+        srv = os.path.join(bindir, "llama-server")
+        if not os.path.exists(srv):
+            print("Fetching prebuilt llama-server (linux vulkan)...", flush=True)
+            try:
+                import urllib.request as _u
+                rel = _json_loads_url("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
+                asset = next((a for a in rel.get("assets", []) if "ubuntu" in a["name"] and "vulkan" in a["name"] and a["name"].endswith(".zip")), None)
+                if asset:
+                    run("apt-get install -y unzip libvulkan1 >/dev/null 2>&1 || true")
+                    url = asset["browser_download_url"]
+                    run("curl -L '" + url + "' -o /tmp/lc.zip && cd /tmp && unzip -o -q lc.zip && find /tmp -name llama-server -type f -exec cp {} " + srv + " \\; && chmod +x " + srv + " || true")
+            except Exception as e:
+                print(f"prebuilt fetch failed: {e}", flush=True)
+        if not os.path.exists(srv):
+            print("Prebuilt unavailable -> building llama.cpp with CUDA from source (~10 min)...", flush=True)
+            run("rm -rf /tmp/llama.cpp && git clone --depth 1 https://github.com/ggml-org/llama.cpp /tmp/llama.cpp || true")
+            run("cd /tmp/llama.cpp && cmake -B build -DGGML_CUDA=ON > /tmp/cmake.log 2>&1 && cmake --build build --config Release -j$(nproc) --target llama-server >> /tmp/cmake.log 2>&1 && cp build/bin/llama-server " + srv + " || tail -20 /tmp/cmake.log")
+        if not os.path.exists(srv):
+            print("llama-server unavailable", flush=True)
+            return []
+        run("fuser -k 1234/tcp 2>/dev/null || true")
         time.sleep(1)
-        env_line = "OLLAMA_HOST=0.0.0.0:1234 OLLAMA_SCHED_SPREAD=1 OLLAMA_CONTEXT_LENGTH=8192"
-        procs_local = [run_bg(f"{env_line} ollama serve", "ollama:1234")]
-        wait_http("http://localhost:1234/v1/models", tries=6, name="Ollama :1234")
-        # ladder: prefer coder MoE, then smaller dense that definitely fits
-        for tag in ["qwen3-coder:30b-a3b-instruct", "qwen2.5-coder:14b-instruct", "qwen2.5-coder:7b-instruct"]:
-            print(f"ollama pull {tag} ...", flush=True)
-            if not run(f"ollama pull {tag}"):
-                continue
-            r = subprocess.run(
-                f"curl -s -m 120 -o /tmp/ollama_warm.json -w '%{{http_code}}' "
-                f"-X POST http://localhost:1234/v1/chat/completions -H 'Content-Type: application/json' "
-                f"-d '{{\"model\":\"{tag}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}],\"max_tokens\":5}}'",
-                shell=True, capture_output=True, text=True)
-            code = r.stdout.strip()
-            body = open("/tmp/ollama_warm.json").read()[:300] if os.path.exists("/tmp/ollama_warm.json") else ""
-            if code.startswith("2") and '"error"' not in body:
-                print(f"OLLAMA ENGINE UP: model={tag} on http://localhost:1234/v1", flush=True)
-                # patch opencode.json with the ollama tag
-                try:
-                    import json as _json
-                    pj = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
-                    j = _json.load(open(pj))
-                    for prov in ["lmstudio-local", "lmstudio-tunneled"]:
-                        m = j["provider"][prov].setdefault("models", {})
-                        m.clear()  # lms keys invalid under ollama
-                        m[tag] = {"name": tag, "tool_call": True, "limit": {"context": 8192, "output": 4096}}
-                    open(pj, "w").write(_json.dumps(j, indent=2))
-                except Exception:
-                    pass
-                return procs_local
-            print(f"{tag} failed to load (http {code}) {body[:150]} - trying smaller...", flush=True)
-        print("Ollama ladder exhausted", flush=True)
-        return procs_local
+        alias = "qwen3-coder"
+        cmd = (f"CUDA_VISIBLE_DEVICES=0,1 {srv} -m '{gguf}' --alias {alias} --host 0.0.0.0 --port 1234 "
+               f"-ngl 99 -c 16384 --split-mode layer --tensor-split 1,1 --jinja")
+        procs = [run_bg(cmd, "llamacpp:1234")]
+        if wait_http("http://localhost:1234/health", tries=30, delay=5, name="llama.cpp :1234"):
+            print(f"LLAMA.CPP UP: {gguf} split across both T4s (ctx 16384)", flush=True)
+            try:
+                import json as _json
+                pj = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
+                j = _json.load(open(pj))
+                for prov in ["lmstudio-local", "lmstudio-tunneled"]:
+                    m = j["provider"][prov].setdefault("models", {})
+                    m.clear()
+                    m[alias] = {"name": alias, "tool_call": True, "limit": {"context": 16384, "output": 8192}}
+                open(pj, "w").write(_json.dumps(j, indent=2))
+            except Exception:
+                pass
+        else:
+            print("--- last 15 lines of llamacpp log ---", flush=True)
+            try:
+                print("\n".join(open("/tmp/llamacpp:1234.log").readlines()[-15:]), flush=True)
+            except Exception:
+                pass
+        return procs
+
+    def _json_loads_url(url):
+        import json as _json
+        import urllib.request as _u
+        return _json.load(_u.urlopen(url, timeout=30))
 
     if os.environ.get("LMS_LOAD_FAILED") == "1":
-        tunnels.extend(deploy_ollama())
+        tunnels.extend(deploy_llamacpp())
         DOMAIN_SERVED = True
     else:
         DOMAIN_SERVED = False
