@@ -20,6 +20,7 @@ import os
 import sys
 import subprocess
 import time
+import re
 import shutil
 
 def get_secret(name, default=None):
@@ -44,8 +45,19 @@ def get_secret(name, default=None):
     return default
 
 def run_bg(cmd, name):
-    print(f"[{name}] {cmd}", flush=True)
-    return subprocess.Popen(cmd, shell=True)
+    # setsid + detached + logfile: survives parent/cell end, no pipe blocking
+    log = f"/tmp/{name.replace('/', '_')}.log"
+    lf = open(log, "ab", buffering=0)
+    print(f"[{name}] (detached, log={log}) {cmd}", flush=True)
+    return subprocess.Popen(cmd, shell=True, start_new_session=True, stdout=lf, stderr=subprocess.STDOUT)
+
+def grep_url(name, pattern=r"https://[a-z0-9-]+\.trycloudflare\.com"):
+    p = f"/tmp/{name}.log"
+    try:
+        m = re.search(pattern, open(p).read())
+        return m.group(0) if m else None
+    except Exception:
+        return None
 
 def run(cmd):
     print(f"$ {cmd}", flush=True)
@@ -303,7 +315,12 @@ ingress:
                 print(f"TUNNEL_TOKEN is cfut_ but no cert.pem (headless Kaggle) -> using quick tunnels (trycloudflare.com) for each port", flush=True)
                 # quick tunnels need no cert/domain, one per service
                 for sub, port in [("ai", 1234), ("oc", 2456), ("chamber", 3000)]:
-                    tunnels.append(run_bg(f"cloudflared tunnel --url http://localhost:{port} 2>&1 | sed -u 's/^/[{sub}]/'", f"cloudflared-{sub}"))
+                    tunnels.append(run_bg(f"cloudflared tunnel --url http://localhost:{port}", f"cloudflared-{sub}"))
+                print("Waiting for quick tunnel URLs...", flush=True)
+                time.sleep(12)
+                for sub in ["ai", "oc", "chamber"]:
+                    u = grep_url(f"cloudflared-{sub}")
+                    print(f"  {sub}: {u or 'pending - check /tmp/cloudflared-' + sub + '.log'}", flush=True)
                 print(f"Quick tunnels started for ai:1234 oc:2456 chamber:3000 (check logs for https://*.trycloudflare.com URLs)", flush=True)
         else:
             run(f"cloudflared tunnel create {TUNNEL} || true")
