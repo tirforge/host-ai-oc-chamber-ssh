@@ -91,7 +91,11 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
                 return _json.load(r)
         # 1. account id
         acc = api("GET", "/accounts")
-        if not acc.get("success"): print(f"CF API accounts failed: {acc.get('errors')}", flush=True); return None
+        if not acc.get("success"):
+            print(f"CF API accounts failed: {acc.get('errors')}", flush=True)
+            print("Your token lacks permissions. Create API token with: Account > Cloudflare Tunnel > Edit + Zone > DNS > Edit (aaruvi.space).", flush=True)
+            print("Or use Zero Trust dashboard tunnel JWT (starts with eyJ) as TUNNEL_TOKEN instead.", flush=True)
+            return None
         aid = acc["result"][0]["id"]
         # 2. create tunnel (remote-managed)
         t = api("POST", f"/accounts/{aid}/cfd_tunnel", {"name": tunnel_name, "config_src": "cloudflare"})
@@ -298,11 +302,19 @@ def main():
                 if ggufs:
                     print(f"Downloaded {len(ggufs)} GGUF file(s) -> {dest}", flush=True)
                     run("lms daemon up || true")
-                    # load model so /v1/models lists it
-                    g0 = sorted(ggufs, key=len)[0]  # smallest = often not main; prefer largest
-                    g0 = max(ggufs, key=os.path.getsize)
-                    print(f"Loading {os.path.basename(g0)}...", flush=True)
-                    run(f'lms load "{g0}" -y --gpu max || lms load "{g0}" -y || lms load "{os.path.basename(g0)}" -y || true')
+                    # trigger scan then load by discovered model key
+                    ls = subprocess.run("lms ls", shell=True, capture_output=True, text=True).stdout
+                    key = None
+                    for line in ls.splitlines():
+                        if "qwen3-coder" in line.lower():
+                            key = line.split()[0]
+                            break
+                    if key:
+                        print(f"Loading discovered key: {key}", flush=True)
+                        run(f'lms load "{key}" -y --gpu max || lms load "{key}" -y || true')
+                    else:
+                        g0 = max(ggufs, key=os.path.getsize)
+                        print(f"Key not found via lms ls; relying on JIT auto-load of {os.path.basename(g0)}", flush=True)
                 else:
                     print("HF direct download failed too - server will start with no model; set MODEL secret to a valid HF GGUF repo", flush=True)
     else:
