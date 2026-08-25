@@ -3,3 +3,5 @@
 # keep opencode.json tracked
 !opencode.json
 __pycache__
+*.egg-info/
+__pycache__/

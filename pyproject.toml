@@ -1,0 +1,18 @@
+[project]
+name = "host-ai-oc-chamber-ssh"
+version = "0.2.0"
+description = "Host stack: LM Studio (1234) + Opencode (2456) + OpenChamber (3000) + SSH (22) via single Cloudflare tunnel - non-Docker, dual T4, Kaggle secrets"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+host-stack = "scripts.startup:main"
+host-ai-oc = "scripts.startup:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["scripts"]
