@@ -51,9 +51,22 @@ def run(cmd):
     r = subprocess.run(cmd, shell=True)
     return r.returncode == 0
 
+
+def ensure_tool(name, install_cmd):
+    if shutil.which(name):
+        return True
+    print(f"{name} not found, installing...", flush=True)
+    run(install_cmd)
+    # also try common paths
+    for p in [os.path.expanduser("~/.local/bin"), "/usr/local/bin", os.path.expanduser("~/.lmstudio/bin")]:
+        if p not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{p}:{os.environ.get('PATH','')}"
+    return shutil.which(name) is not None
+
 def main():
     CF_TOKEN = get_secret("CF_TOKEN") or get_secret("CLOUDFLARE_API_TOKEN") or get_secret("CLOUDFLARE_TOKEN")
     DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
+    TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
     # MODEL: if secret not present -> default qwen3-coder-30b-a3b, if passed -> use that
     MODEL_DEFAULT = "qwen/qwen3-coder-30b-a3b"
@@ -63,9 +76,13 @@ def main():
     MODEL = MODEL.strip()
     TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
 
-    if not CF_TOKEN or not DOMAIN:
-        print("ERROR: Need CF_TOKEN and CF_DOMAIN set as env/Kaggle secrets", flush=True)
-        print(f"Got CF_TOKEN={'***' if CF_TOKEN else 'MISSING'} DOMAIN={DOMAIN}", flush=True)
+    if not DOMAIN:
+        print("ERROR: Need CF_DOMAIN (yourdomain.com) set as env/Kaggle secret", flush=True)
+        print(f"Got DOMAIN={DOMAIN}", flush=True)
+        sys.exit(1)
+    if not CF_TOKEN and not TUNNEL_TOKEN:
+        print("ERROR: Need CF_TOKEN (API token) or TUNNEL_TOKEN (Zero Trust tunnel token) set as env/Kaggle secret", flush=True)
+        print(f"Got CF_TOKEN={'***' if CF_TOKEN else 'MISSING'} TUNNEL_TOKEN={'***' if TUNNEL_TOKEN else 'MISSING'}", flush=True)
         sys.exit(1)
 
     os.environ["OPENCHAMBER_UI_PASSWORD"] = PASSWORD
@@ -88,6 +105,12 @@ def main():
             open(p, "w").write(json.dumps(j, indent=2))
     except Exception as e:
         print(f"opencode.json patch skipped: {e}", flush=True)
+
+    # Kaggle/CI auto-install missing tools
+    ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"")
+    ensure_tool("cloudflared", "curl -fsSL https://pkg.cloudflare.com/cloudflared.deb -o /tmp/cloudflared.deb && dpkg -i /tmp/cloudflared.deb || curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared")
+    ensure_tool("opencode", "curl -fsSL https://opencode.ai/install | bash")
+    ensure_tool("openchamber", "curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
 
     # 1. Pull model (LM Studio)
     if shutil.which("lms"):
@@ -125,10 +148,11 @@ def main():
 
     # 3. Cloudflare tunnel - 4 ingress: ai, oc, chamber, ssh
     config_path = os.path.expanduser("~/.cloudflared/config.yml")
+    cred_path = os.path.expanduser(f"~/.cloudflared/{TUNNEL}.json")
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    if not os.path.exists(config_path):
-        cfg = f"""tunnel: {TUNNEL}
-credentials-file: /root/.cloudflared/{TUNNEL}.json
+    # always ensure config reflects current DOMAIN/TUNNEL (fix stale ~/.cloudflared/config.yml)
+    cfg = f"""tunnel: {TUNNEL}
+credentials-file: {cred_path}
 ingress:
   - hostname: ai.{DOMAIN}
     service: http://localhost:1234
@@ -140,15 +164,19 @@ ingress:
     service: ssh://localhost:22
   - service: http_status:404
 """
-        open(config_path, "w").write(cfg)
-        print(f"Wrote {config_path}", flush=True)
+    open(config_path, "w").write(cfg)
+    print(f"Wrote {config_path}", flush=True)
 
     if shutil.which("cloudflared"):
-        run(f"cloudflared tunnel create {TUNNEL} || true")
-        for sub in ["ai", "oc", "chamber", "ssh"]:
-            run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
-        print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
-        procs.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
+        if TUNNEL_TOKEN:
+            print(f"Using TUNNEL_TOKEN (Zero Trust) for {TUNNEL} ...", flush=True)
+            procs.append(run_bg(f"cloudflared tunnel run --token {TUNNEL_TOKEN}", "cloudflared"))
+        else:
+            run(f"cloudflared tunnel create {TUNNEL} || true")
+            for sub in ["ai", "oc", "chamber", "ssh"]:
+                run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
+            print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
+            procs.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
         print(f"AI: https://ai.{DOMAIN}/v1  OC: https://oc.{DOMAIN}  Chamber: https://chamber.{DOMAIN}  SSH: ssh.{DOMAIN}", flush=True)
     else:
         print("cloudflared missing, install via: curl -fsSL https://pkg.cloudflare.com/cloudflared | sh", flush=True)

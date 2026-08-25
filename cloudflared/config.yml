@@ -1,5 +1,5 @@
 tunnel: t4host
-credentials-file: /root/.cloudflared/<TUNNEL_ID>.json
+credentials-file: ~/.cloudflared/<TUNNEL_ID>.json
 ingress:
   - hostname: ai.yourdomain.com
     service: http://localhost:1234

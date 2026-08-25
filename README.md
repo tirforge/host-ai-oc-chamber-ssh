@@ -55,21 +55,26 @@ MODEL=qwen/qwen3-coder-30b-a3b ./scripts/host.sh yourdomain.com
 # or: MODEL=mistralai/devstral-small-2507 ./scripts/host.sh yourdomain.com t4host
 ```
 
-## Kaggle Start (with secrets)
+## Kaggle Start (with secrets) - fully supported
 
-Add Secrets in Kaggle Notebook: `Add-ons -> Secrets` and toggle on:
-* `CF_TOKEN` (or `CLOUDFLARE_API_TOKEN`) - CF API token with Zone/DNS/Tunnel Edit
-* `CF_DOMAIN` (or `CLOUDFLARE_DOMAIN`) - `yourdomain.com`
+Kaggle notebook must have **Internet ON** (Settings -> Internet) and **GPU T4 x2** (Settings -> Accelerator -> GPU T4 x2). All 4 services auto-install if missing.
+
+Add Secrets in Kaggle Notebook: `Add-ons -> Secrets` and toggle on for this notebook:
+* `CF_TOKEN` (or `CLOUDFLARE_API_TOKEN`) - CF API token with Zone/DNS/Tunnel Edit **or** `TUNNEL_TOKEN` (Zero Trust -> Networks -> Tunnels -> Create tunnel -> Copy token) - if you use `TUNNEL_TOKEN` you don't need `CF_TOKEN` API calls
+* `CF_DOMAIN` - `yourdomain.com` (your Cloudflare domain)
 * `OPENCHAMBER_UI_PASSWORD` (or `PASSWORD`)
-* `MODEL` (optional, default `qwen/qwen3-coder-30b-a3b`, if set that model is pulled)
+* `MODEL` (optional, default `qwen/qwen3-coder-30b-a3b` A3B - if secret missing -> default, if set like `mistralai/devstral-small-2507` -> pulls that)
+* `TUNNEL_TOKEN` (optional alternative to `CF_TOKEN` for headless Kaggle where `cloudflared tunnel login` browser is impossible)
 
-Cell:
+Cell (Kaggle, with Internet + GPU):
 ```python
 !git clone --recurse-submodules https://github.com/tirforge/host-ai-oc-chamber-ssh
-!pip install -q kaggle_secrets  # if missing
-!python host-ai-oc-chamber-ssh/scripts/startup.py
-# MODEL not set -> pulls qwen3-coder-30b-a3b, if you set MODEL=... in Secrets it pulls that
+!pip install -q kaggle_secrets  # preinstalled on Kaggle, no-op if exists
+!python host-ai-oc-chamber-ssh/scripts/startup.py  # reads Kaggle Secrets via UserSecretsClient + env, auto-installs lms/cloudflared/opencode/openchamber if missing, pulls $MODEL
+# MODEL not set -> pulls qwen3-coder-30b-a3b Q4_K_M (55-70 tok/s on dual T4), if you set MODEL=... in Secrets it pulls that and patches opencode.json tool_call:true
 ```
+
+`scripts/startup.py` handles both: `os.environ` and `kaggle_secrets.UserSecretsClient`, strip-empty, `MODEL`/`MODEL_NAME` fallback, `TUNNEL_TOKEN` vs `CF_TOKEN` branching, `~/.cloudflared` paths via `expanduser`, dual T4 auto-detect `CUDA_VISIBLE_DEVICES=0,1`.
 
 ## Python Command to Run
 
