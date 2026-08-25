@@ -335,15 +335,17 @@ def main():
                             break
                     if key:
                         print(f"Loading discovered key: {key}", flush=True)
-                        # CUDA OOM retry ladder: default -> 16384 -> 8192 -> 4096 ctx (dual T4 32GB)
+                        # CUDA OOM root cause: GGUF metadata default ctx can be 262k -> KV cache 25GB+
+                        # Force explicit safe contexts first (dual T4 = ~30GB usable total)
                         loaded = False
-                        for ctx in ["", "--context-length 16384", "--context-length 8192", "--context-length 4096"]:
+                        for ctx in ["--context-length 16384", "--context-length 8192", "--context-length 4096", ""]:
+                            suffix = f" (ctx{ctx.split()[-1]})" if ctx else " (model default - last resort)"
                             if run(f'lms load "{key}" -y --gpu max {ctx}'):
                                 loaded = True
                                 break
-                            print(f"load failed{f' with {ctx}' if ctx else ' with default ctx'} - trying smaller context...", flush=True)
+                            print(f"load failed {suffix} - trying smaller...", flush=True)
                         if not loaded:
-                            print("All load attempts OOMed - set MODEL to a smaller GGUF (e.g. Qwen2.5-Coder-7B)", flush=True)
+                            print("All load attempts OOMed - set MODEL to a smaller GGUF (e.g. lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF)", flush=True)
                     else:
                         g0 = max(ggufs, key=os.path.getsize)
                         print(f"Key not found via lms ls; relying on JIT auto-load of {os.path.basename(g0)}", flush=True)
