@@ -76,6 +76,64 @@ def ensure_tool(name, install_cmd):
             os.environ["PATH"] = f"{p}:{os.environ.get('PATH','')}"
     return shutil.which(name) is not None
 
+def cf_api_named_tunnel(cf_token, domain, tunnel_name):
+    """Create named tunnel + DNS + ingress entirely via Cloudflare API (no cert.pem/browser).
+    Returns run-JWT for `cloudflared tunnel run --token`, or None."""
+    import json as _json
+    try:
+        import urllib.request
+        H = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
+        def api(method, path, body=None):
+            req = urllib.request.Request(f"https://api.cloudflare.com/client/v4{path}",
+                                         data=_json.dumps(body).encode() if body else None,
+                                         headers=H, method=method)
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return _json.load(r)
+        # 1. account id
+        acc = api("GET", "/accounts")
+        if not acc.get("success"): print(f"CF API accounts failed: {acc.get('errors')}", flush=True); return None
+        aid = acc["result"][0]["id"]
+        # 2. create tunnel (remote-managed)
+        t = api("POST", f"/accounts/{aid}/cfd_tunnel", {"name": tunnel_name, "config_src": "cloudflare"})
+        if not t.get("success"):
+            errs = str(t.get("errors"))
+            if "already exists" in errs or "10603" in errs:
+                lst = api("GET", f"/accounts/{aid}/cfd_tunnel?name={tunnel_name}&is_deleted=false")
+                tid = lst["result"][0]["id"]; tok = None
+                ttok = api("GET", f"/accounts/{aid}/cfd_tunnel/{tid}/token")
+                tok = ttok["result"] if ttok.get("success") else None
+            else:
+                print(f"CF tunnel create failed: {errs}", flush=True); return None
+        else:
+            tid = t["result"]["id"]; tok = t["result"].get("token")
+        # 3. ingress config (remote-managed): ai/oc/chamber/ssh -> local ports
+        ing = {
+            "config": {"ingress": [
+                {"hostname": f"ai.{domain}", "service": "http://localhost:1234"},
+                {"hostname": f"oc.{domain}", "service": "http://localhost:2456"},
+                {"hostname": f"chamber.{domain}", "service": "http://localhost:3000"},
+                {"hostname": f"ssh.{domain}", "service": "ssh://localhost:22"},
+                {"service": "http_status:404"},
+            ]}}
+        cfg = api("PUT", f"/accounts/{aid}/cfd_tunnel/{tid}/configurations", ing)
+        if not cfg.get("success"): print(f"CF ingress config failed: {cfg.get('errors')}", flush=True)
+        # 4. DNS CNAMEs
+        z = api("GET", f"/zones?name={domain}")
+        if z.get("success") and z["result"]:
+            zid = z["result"][0]["id"]
+            for sub in ["ai", "oc", "chamber", "ssh"]:
+                body = {"type": "CNAME", "name": f"{sub}.{domain}", "content": f"{tid}.cfargotunnel.com", "proxied": True}
+                r = api("POST", f"/zones/{zid}/dns_records", body)
+                print(f"DNS {sub}.{domain}: {'created' if r.get('success') else r.get('errors')}", flush=True)
+        else:
+            print(f"Zone {domain} not found on this token's account - create CNAMEs manually -> {tid}.cfargotunnel.com", flush=True)
+        print(f"Tunnel {tunnel_name} ({tid}) ready - run token obtained", flush=True)
+        return tok
+    except Exception as e:
+        print(f"CF API setup failed: {e}", flush=True)
+        return None
+
+
 def main():
     # Export PATH before any which checks (fixes lms/opencode not found after install)
     for p in [os.path.expanduser("~/.lmstudio/bin"), os.path.expanduser("~/.opencode/bin"), os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
@@ -299,21 +357,16 @@ ingress:
             print(f"Using TUNNEL_TOKEN (Zero Trust JWT) for {TUNNEL} ...", flush=True)
             tunnels.append(run_bg(f"cloudflared tunnel run --token {TUNNEL_TOKEN}", "cloudflared"))
         elif TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("cfut_"):
-            # cfut_ API token in headless Kaggle has no cert.pem -> use quick tunnels (trycloudflare.com) as fallback
-            cert = os.path.expanduser("~/.cloudflared/cert.pem")
-            if os.path.exists(cert):
-                print(f"TUNNEL_TOKEN is cfut_ API token, using named tunnel flow (create + route dns)", flush=True)
-                if not CF_TOKEN:
-                    CF_TOKEN = TUNNEL_TOKEN
-                    os.environ["CLOUDFLARE_API_TOKEN"] = CF_TOKEN
-                run(f"cloudflared tunnel create {TUNNEL} || true")
-                for sub in ["ai", "oc", "chamber", "ssh"]:
-                    run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
-                print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
-                tunnels.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
+            # cfut_ = API token. Headless Kaggle has no cert.pem for `tunnel create`.
+            # Use Cloudflare REST API to create named tunnel + ingress + DNS, then run with returned JWT.
+            api_tok = CF_TOKEN or TUNNEL_TOKEN
+            jwt = cf_api_named_tunnel(api_tok, DOMAIN, TUNNEL)
+            if jwt:
+                print(f"Using API-created tunnel run token for {TUNNEL} ...", flush=True)
+                tunnels.append(run_bg(f"cloudflared tunnel run --token {jwt}", "cloudflared"))
             else:
-                print(f"TUNNEL_TOKEN is cfut_ but no cert.pem (headless Kaggle) -> using quick tunnels (trycloudflare.com) for each port", flush=True)
-                # quick tunnels need no cert/domain, one per service
+                # last resort: quick tunnels
+                print("API tunnel setup failed -> falling back to quick tunnels (trycloudflare.com)", flush=True)
                 for sub, port in [("ai", 1234), ("oc", 2456), ("chamber", 3000)]:
                     tunnels.append(run_bg(f"cloudflared tunnel --url http://localhost:{port}", f"cloudflared-{sub}"))
                 print("Waiting for quick tunnel URLs...", flush=True)
@@ -321,7 +374,6 @@ ingress:
                 for sub in ["ai", "oc", "chamber"]:
                     u = grep_url(f"cloudflared-{sub}")
                     print(f"  {sub}: {u or 'pending - check /tmp/cloudflared-' + sub + '.log'}", flush=True)
-                print(f"Quick tunnels started for ai:1234 oc:2456 chamber:3000 (check logs for https://*.trycloudflare.com URLs)", flush=True)
         else:
             run(f"cloudflared tunnel create {TUNNEL} || true")
             for sub in ["ai", "oc", "chamber", "ssh"]:
