@@ -59,16 +59,16 @@ def test_model_default_logic():
             if name == "MODEL_NAME":
                 return model_name_env
             return None
-        MODEL_DEFAULT = "qwen/qwen3-coder-30b-a3b"
+        MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
         MODEL = gs("MODEL") or gs("MODEL_NAME") or MODEL_DEFAULT
         if not MODEL or not MODEL.strip():
             MODEL = MODEL_DEFAULT
         return MODEL.strip()
 
-    assert resolve(None, None) == "qwen/qwen3-coder-30b-a3b"
+    assert resolve(None, None) == "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
     assert resolve("mistralai/devstral-small-2507", None) == "mistralai/devstral-small-2507"
     assert resolve("", "qwen/qwen3.5-35b-a3b") == "qwen/qwen3.5-35b-a3b"
-    assert resolve("   ", None) == "qwen/qwen3-coder-30b-a3b"
+    assert resolve("   ", None) == "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
 
 
 def test_startup_import_main():

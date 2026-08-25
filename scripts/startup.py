@@ -6,11 +6,11 @@ Host stack startup for Kaggle / any env - reads secrets from env or Kaggle UserS
 - Model -> default qwen3-coder-30b-a3b (auto-pulled via lms)
 
 Env secrets (set in Kaggle Secrets -> Add-ons -> Secrets):
-  CF_TOKEN / CLOUDFLARE_API_TOKEN / CLOUDFLARE_TOKEN
-  CF_DOMAIN / CLOUDFLARE_DOMAIN / DOMAIN  (e.g. yourdomain.com)
+  CF_TOKEN / CLOUDFLARE_API_TOKEN / CLOUDFLARE_TOKEN (API token) OR TUNNEL_TOKEN (Zero Trust JWT, prefer for Kaggle)
+  CF_DOMAIN / CLOUDFLARE_DOMAIN / DOMAIN  (e.g. aaruvi.space)
   OPENCHAMBER_UI_PASSWORD / UI_PASSWORD / PASSWORD
   SSH_PASSWORD / SSH_PASS (for ssh.yourdomain.com via cloudflared, sets Linux password for root/current user)
-  MODEL  (default: qwen/qwen3-coder-30b-a3b)
+  MODEL  (default: lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M - use HF repo or LM Studio ID, not qwen/qwen3-coder-30b-a3b)
   TUNNEL_NAME (default: t4host)
   LM_API_TOKEN (optional, for ai subdomain auth)
 
@@ -91,8 +91,8 @@ def main():
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
     SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD")
-    # MODEL: if secret not present -> default qwen3-coder-30b-a3b, if passed -> use that
-    MODEL_DEFAULT = "qwen/qwen3-coder-30b-a3b"
+    # MODEL: if secret not present -> default, if passed -> use that (use HF repo for lms, e.g. lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M)
+    MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-GGUF:Q4_K_M"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
     if not MODEL or not MODEL.strip():
         MODEL = MODEL_DEFAULT
@@ -140,29 +140,41 @@ def main():
         print(f"opencode.json patch skipped: {e}", flush=True)
 
     # Kaggle/CI auto-install missing tools
-    ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"")
-    ensure_tool("cloudflared", "curl -fsSL https://pkg.cloudflare.com/cloudflared.deb -o /tmp/cloudflared.deb && dpkg -i /tmp/cloudflared.deb || curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared")
-    ensure_tool("opencode", "curl -fsSL https://opencode.ai/install | bash")
-    ensure_tool("openchamber", "curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
+    ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"; lms daemon up || true")
+    ensure_tool("cloudflared", "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared || curl -fsSL https://pkg.cloudflare.com/cloudflared.deb -o /tmp/cloudflared.deb && dpkg -i /tmp/cloudflared.deb || true")
+    ensure_tool("opencode", "curl -fsSL https://opencode.ai/install | bash; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
+    # openchamber needs Node 22+ - install via fnm if needed
+    if not shutil.which("openchamber"):
+        if not shutil.which("node") or not run("node --version | grep -q 'v22\\|v23\\|v24'"):
+            print("Installing Node 22 for openchamber...", flush=True)
+            run("curl -fsSL https://fnm.vercel.app/install | bash; export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env)\"; fnm install 22; fnm use 22 || true")
+            run("curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm install 22; nvm use 22 || true")
+        ensure_tool("openchamber", "curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
 
-    # 1. Pull model (LM Studio)
+    # 1. Pull model (LM Studio) - try HF repo, fallback to alias
     if shutil.which("lms"):
         try:
             n = subprocess.run("nvidia-smi --query-gpu=name --format=csv,noheader | grep -c T4 || echo 0", shell=True, capture_output=True, text=True).stdout.strip()
             if "2" in n:
-                print("Dual T4 detected, setting CUDA_VISIBLE_DEVICES=0,1 and MTP", flush=True)
+                print("Dual T4 detected, setting CUDA_VISIBLE_DEVICES=0,1", flush=True)
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
         except Exception:
             pass
-        print("Pulling model...", flush=True)
-        run(f'lms get {MODEL} -y || lms get {MODEL} || echo "lms get failed - check LM Studio catalog"')
+        print(f"Pulling model {MODEL}...", flush=True)
+        run("lms daemon up || true")
+        # try requested model, fallback to known good
+        if not run(f'lms get {MODEL} -y'):
+            run(f'lms get {MODEL} || true')
+        # fallback if still no model
+        run('lms get lmstudio-community/Qwen3-Coder-30B-A3B-GGUF -y || true')
     else:
         print("lms not found, skipping model pull (install LM Studio first)", flush=True)
 
     # 2. Start services
     procs = []
     if shutil.which("lms"):
-        procs.append(run_bg("lms server start --port 1234 --cors --gpu max --jinja", "lmstudio:1234"))
+        # lms server start does not support --gpu/--jinja, use plain
+        procs.append(run_bg("lms server start --port 1234 --cors", "lmstudio:1234"))
     else:
         print("lms missing", flush=True)
 
@@ -201,9 +213,21 @@ ingress:
     print(f"Wrote {config_path}", flush=True)
 
     if shutil.which("cloudflared"):
-        if TUNNEL_TOKEN:
-            print(f"Using TUNNEL_TOKEN (Zero Trust) for {TUNNEL} ...", flush=True)
+        # cfut_ is API token, eyJ... is JWT tunnel token
+        is_jwt = TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("eyJ") and TUNNEL_TOKEN.count(".") >= 2
+        if TUNNEL_TOKEN and is_jwt:
+            print(f"Using TUNNEL_TOKEN (Zero Trust JWT) for {TUNNEL} ...", flush=True)
             procs.append(run_bg(f"cloudflared tunnel run --token {TUNNEL_TOKEN}", "cloudflared"))
+        elif TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("cfut_"):
+            print(f"TUNNEL_TOKEN is cfut_ API token, using named tunnel flow (create + route dns)", flush=True)
+            if not CF_TOKEN:
+                CF_TOKEN = TUNNEL_TOKEN
+                os.environ["CLOUDFLARE_API_TOKEN"] = CF_TOKEN
+            run(f"cloudflared tunnel create {TUNNEL} || true")
+            for sub in ["ai", "oc", "chamber", "ssh"]:
+                run(f"cloudflared tunnel route dns {TUNNEL} {sub}.{DOMAIN} || true")
+            print(f"Starting cloudflared tunnel {TUNNEL} ...", flush=True)
+            procs.append(run_bg(f"cloudflared tunnel run {TUNNEL}", "cloudflared"))
         else:
             run(f"cloudflared tunnel create {TUNNEL} || true")
             for sub in ["ai", "oc", "chamber", "ssh"]:
