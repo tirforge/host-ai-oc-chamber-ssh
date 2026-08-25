@@ -1,0 +1,32 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-lmstudio@1.0.0-rc.2"],
+  "provider": {
+    "lmstudio-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio (local)",
+      "options": { "baseURL": "http://localhost:1234/v1" },
+      "models": {
+        "qwen3-coder-30b-a3b": {
+          "name": "Qwen3 Coder 30B A3B (default, auto-pulled)",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 32768, "output": 8192 }
+        }
+      }
+    },
+    "lmstudio-tunneled": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio (tunneled)",
+      "options": { "baseURL": "https://ai.yourdomain.com/v1", "apiKey": "{env:LM_API_TOKEN}" },
+      "models": {
+        "qwen3-coder-30b-a3b": {
+          "name": "Qwen3 Coder 30B A3B (default, auto-pulled)",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 32768, "output": 8192 }
+        }
+      }
+    }
+  }
+}

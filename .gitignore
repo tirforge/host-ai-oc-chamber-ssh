@@ -1,3 +1,4 @@
 .cloudflared/
-*.json
 .env
+# keep opencode.json tracked
+!opencode.json
