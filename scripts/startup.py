@@ -384,7 +384,23 @@ def main():
                 if asset:
                     run("apt-get install -y unzip libvulkan1 >/dev/null 2>&1 || true")
                     url = asset["browser_download_url"]
-                    run("curl -L '" + url + "' -o /tmp/lc.zip && cd /tmp && unzip -o -q lc.zip && find /tmp -name llama-server -type f -exec cp {} " + srv + " \\; && chmod +x " + srv + " || true")
+                    # extract WHOLE dist (llama-server needs libllama.so / libggml-*.so next to it)
+                    dist = os.path.join(bindir, "llama-dist")
+                    run("rm -rf /tmp/lc " + dist + " && mkdir -p /tmp/lc " + dist +
+                        " && curl -L '" + url + "' -o /tmp/lc.zip && cd /tmp/lc && unzip -o -q /tmp/lc.zip" +
+                        " && cp -r /tmp/lc/* " + dist + "/ || true")
+                    if os.path.exists(dist):
+                        found = None
+                        for root, _, files in os.walk(dist):
+                            if "llama-server" in files:
+                                found = os.path.join(root, "llama-server")
+                                break
+                        if found:
+                            import shutil as _sh
+                            _sh.copy2(found, srv)
+                            os.chmod(srv, 0o755)
+                            libdir = os.path.dirname(found)
+                            os.environ["LD_LIBRARY_PATH"] = libdir + ":" + os.environ.get("LD_LIBRARY_PATH", "")
             except Exception as e:
                 print(f"prebuilt fetch failed: {e}", flush=True)
         if not os.path.exists(srv):
