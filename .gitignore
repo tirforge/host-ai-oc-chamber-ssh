@@ -2,3 +2,4 @@
 .env
 # keep opencode.json tracked
 !opencode.json
+__pycache__
