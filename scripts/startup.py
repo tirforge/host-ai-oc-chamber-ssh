@@ -21,6 +21,7 @@ import sys
 import subprocess
 import time
 import re
+import json
 import shutil
 
 def get_secret(name, default=None):
@@ -362,12 +363,12 @@ def main():
     # Only cloudflared tunnels are long-lived processes worth monitoring.
     tunnels = []
 
-    def deploy_llamacpp():
-        """Raw llama.cpp llama-server: explicit multi-GPU split across BOTH T4s, /v1 on 1234."""
-        print("=== Falling back to raw llama.cpp llama-server (explicit dual-T4 split) ===", flush=True)
+    def deploy_llama_runner():
+        """pwilkin/llama-runner: wraps raw llama-server (dual-T4 split), emulates LM Studio /v1 on 1234."""
+        print("=== Engine: pwilkin/llama-runner + llama-server (explicit dual-T4 split) ===", flush=True)
         gguf = os.environ.get("GGUF_PATH")
         if not gguf:
-            print("No GGUF path known - cannot start llama-server", flush=True)
+            print("No GGUF path known - cannot start engine", flush=True)
             return []
         bindir = os.path.expanduser("~/.local/bin")
         os.makedirs(bindir, exist_ok=True)
@@ -375,8 +376,10 @@ def main():
         if not os.path.exists(srv):
             print("Fetching prebuilt llama-server (linux vulkan)...", flush=True)
             try:
+                asset = None
+                import json as _json
                 import urllib.request as _u
-                rel = _json_loads_url("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
+                rel = _json.load(_u.urlopen("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", timeout=30))
                 asset = next((a for a in rel.get("assets", []) if "ubuntu" in a["name"] and "vulkan" in a["name"] and a["name"].endswith(".zip")), None)
                 if asset:
                     run("apt-get install -y unzip libvulkan1 >/dev/null 2>&1 || true")
@@ -391,16 +394,38 @@ def main():
         if not os.path.exists(srv):
             print("llama-server unavailable", flush=True)
             return []
+        # llama-runner install
+        run("rm -rf /tmp/llama-runner && git clone --depth 1 https://github.com/pwilkin/llama-runner /tmp/llama-runner || true")
+        run("pip install -q -r /tmp/llama-runner/requirements.txt --break-system-packages 2>/dev/null || pip install -q -r /tmp/llama-runner/requirements.txt || true")
+        # config tuned for dual T4 + Qwen3-Coder-30B-A3B MoE
+        cfg_dir = os.path.expanduser("~/.llama-runner")
+        os.makedirs(cfg_dir, exist_ok=True)
+        alias = "qwen3-coder"
+        cfg = {
+            "llama-runtimes": {"default": {"runtime": srv}},
+            "models": {alias: {
+                "model_path": gguf,
+                "llama_cpp_runtime": "default",
+                "parameters": {
+                    "ctx_size": 16384,
+                    "gpu_layers": 99,
+                    "flash-attn": True,
+                    "cache-type-k": "q8_0",
+                    "cache-type-v": "q8_0",
+                    "jinja": True,
+                    "threads": 4,
+                },
+            }},
+        }
+        open(os.path.join(cfg_dir, "config.json"), "w").write(json.dumps(cfg, indent=2))
+        print(f"Wrote {cfg_dir}/config.json (alias={alias}, ctx=16384, fa=on, kv=q8_0)", flush=True)
         run("fuser -k 1234/tcp 2>/dev/null || true")
         time.sleep(1)
-        alias = "qwen3-coder"
-        cmd = (f"CUDA_VISIBLE_DEVICES=0,1 {srv} -m '{gguf}' --alias {alias} --host 0.0.0.0 --port 1234 "
-               f"-ngl 99 -c 16384 --split-mode layer --tensor-split 1,1 --jinja")
-        procs = [run_bg(cmd, "llamacpp:1234")]
-        if wait_http("http://localhost:1234/health", tries=30, delay=5, name="llama.cpp :1234"):
-            print(f"LLAMA.CPP UP: {gguf} split across both T4s (ctx 16384)", flush=True)
+        import json as _json
+        procs = [run_bg("cd /tmp/llama-runner && python main.py --headless", "llama-runner:1234")]
+        if wait_http("http://localhost:1234/v1/models", tries=36, delay=5, name="llama-runner :1234"):
+            print(f"LLAMA-RUNNER UP: {os.path.basename(gguf)} split across both T4s", flush=True)
             try:
-                import json as _json
                 pj = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
                 j = _json.load(open(pj))
                 for prov in ["lmstudio-local", "lmstudio-tunneled"]:
@@ -411,9 +436,9 @@ def main():
             except Exception:
                 pass
         else:
-            print("--- last 15 lines of llamacpp log ---", flush=True)
+            print("--- last 20 lines of llama-runner log ---", flush=True)
             try:
-                print("\n".join(open("/tmp/llamacpp:1234.log").readlines()[-15:]), flush=True)
+                print("\n".join(open("/tmp/llama-runner:1234.log").readlines()[-20:]), flush=True)
             except Exception:
                 pass
         return procs
@@ -424,7 +449,7 @@ def main():
         return _json.load(_u.urlopen(url, timeout=30))
 
     if os.environ.get("LMS_LOAD_FAILED") == "1":
-        tunnels.extend(deploy_llamacpp())
+        tunnels.extend(deploy_llama_runner())
         DOMAIN_SERVED = True
     else:
         DOMAIN_SERVED = False
