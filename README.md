@@ -44,6 +44,7 @@ cloudflared tunnel run t4host
 - `opencode.json` - provider points to local LM Studio (ai subdomain for remote), tool_call:true, reasoning:true
 - `scripts/setup-tunnel.sh` - creates + routes DNS for 4 hostnames
 - `enhanced/README.md` - combined enhanced tool calling (opencode-lmstudio + smallcode fallback)
+- `harnesses/smallcode` - submodule `mebassett/smallcode` (forgiving parser, 18 tools, patch-first) - run via `./scripts/run-smallcode.sh`
 - `gpu/dual-t4.json` + `gpu/dual-t4.md` - dual T4 wiring (Q4_K_M, MTP, 32k ctx, CUDA_VISIBLE_DEVICES=0,1)
 
 See `scripts/host.sh` for systemd alternative.

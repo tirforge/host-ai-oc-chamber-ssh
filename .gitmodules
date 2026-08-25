@@ -1,0 +1,3 @@
+[submodule "harnesses/smallcode"]
+	path = harnesses/smallcode
+	url = https://github.com/mebassett/smallcode

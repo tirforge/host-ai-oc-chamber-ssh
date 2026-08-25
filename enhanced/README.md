@@ -13,12 +13,11 @@ Previously discussed repo that enhances tool calling for small/local models is n
 - 2-stage tool routing (halves schema overhead for 8-16k context)
 - SmallCode is terminal-native, points at same LM Studio endpoint `http://localhost:1234/v1`
 
-Clone + run fallback when opencode stalls on tiny context:
+Now vendored as submodule `harnesses/smallcode` (git clone --recurse-submodules). Run fallback when opencode stalls:
+
 ```bash
-git clone https://github.com/mebassett/smallcode
-cd smallcode
-npm install
-SMALLCODE_ENDPOINT=http://localhost:1234/v1 SMALLCODE_MODEL=qwen3-coder-30b-a3b node bin/smallcode.js --cwd ../your-project
+./scripts/run-smallcode.sh ../your-project
+# or: SMALLCODE_ENDPOINT=http://localhost:1234/v1 MODEL=qwen3-coder-30b-a3b ./scripts/run-smallcode.sh .
 ```
 
 ## How host uses it
