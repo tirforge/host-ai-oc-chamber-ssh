@@ -29,10 +29,10 @@ jobs:
           bash -n scripts/run-smallcode.sh && echo "run-smallcode.sh: ok"
       - name: Verify JSON/YAML wiring
         run: |
+          pip install -q pyyaml
           python -c "import json; json.load(open('opencode.json')); print('opencode.json: ok')"
           python -c "import yaml; yaml.safe_load(open('cloudflared/config.yml')); print('cloudflared.yml: ok')"
           python -c "import json, yaml; c=yaml.safe_load(open('cloudflared/config.yml')); assert c['ingress'][0]['service']=='http://localhost:1234', 'ai:1234'; assert c['ingress'][1]['service']=='http://localhost:2456', 'oc:2456'; assert c['ingress'][2]['service']=='http://localhost:3000', 'chamber:3000'; assert c['ingress'][3]['service']=='ssh://localhost:22', 'ssh:22'; print('wiring: ai:1234 oc:2456 chamber:3000 ssh:22 ok')"
-          pip install -q pyyaml
       - name: Flake8 critical syntax
         run: |
           pip install flake8
