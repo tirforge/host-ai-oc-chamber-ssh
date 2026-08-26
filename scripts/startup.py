@@ -27,6 +27,7 @@ import time
 import re
 import json
 import shutil
+import threading
 
 # Load a local .env (gitignored) if present - convenient for non-Kaggle/dev runs.
 # Secrets here are NEVER committed; for Kaggle use Kaggle Secrets instead.
@@ -193,42 +194,46 @@ def _sync_spec():
     ]
 
 
+_sync_lock = threading.Lock()
+
+
 def sync_pull():
     repo = sync_repo_name()
     if not repo:
         print("[sync] SYNC_REPO not set - skipping pull", flush=True)
         return
     local = SYNC_REPO_LOCAL
-    try:
-        expected_url = f"https://github.com/{repo}.git"
-        if os.path.isdir(os.path.join(local, ".git")):
-            # If the local clone points at a different repo (e.g. SYNC_REPO changed),
-            # re-clone so we don't pull/push the wrong repository.
-            cur = subprocess.run(["git", "-C", local, "remote", "get-url", "origin"],
-                                 capture_output=True, text=True).stdout.strip()
-            if cur and repo not in cur:
-                print(f"[sync] local clone points at {cur}; re-cloning for {repo}", flush=True)
-                shutil.rmtree(local)
-        if not os.path.isdir(os.path.join(local, ".git")):
-            print(f"[sync] cloning {repo} ...", flush=True)
-            subprocess.run(["git", "clone", "--depth", "1", expected_url, local], check=True)
-        else:
-            subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"], check=True)
-        copied = 0
-        for rel, dst in _sync_spec():
-            src = os.path.join(local, rel)
-            if os.path.isfile(src):
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
-                copied += 1
-            elif os.path.isdir(src):
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-                copied += 1
-        print(f"[sync] pull applied {copied} item(s)", flush=True)
-    except Exception as e:
-        print(f"[sync] pull failed (continuing): {e}", flush=True)
+    with _sync_lock:
+        try:
+            expected_url = f"https://github.com/{repo}.git"
+            if os.path.isdir(os.path.join(local, ".git")):
+                # If the local clone points at a different repo (e.g. SYNC_REPO changed),
+                # re-clone so we don't pull/push the wrong repository.
+                cur = subprocess.run(["git", "-C", local, "remote", "get-url", "origin"],
+                                     capture_output=True, text=True).stdout.strip()
+                if cur and repo not in cur:
+                    print(f"[sync] local clone points at {cur}; re-cloning for {repo}", flush=True)
+                    shutil.rmtree(local)
+            if not os.path.isdir(os.path.join(local, ".git")):
+                print(f"[sync] cloning {repo} ...", flush=True)
+                subprocess.run(["git", "clone", "--depth", "1", expected_url, local], check=True)
+            else:
+                subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"], check=True)
+            copied = 0
+            for rel, dst in _sync_spec():
+                src = os.path.join(local, rel)
+                if os.path.isfile(src):
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                    copied += 1
+                elif os.path.isdir(src):
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+                    copied += 1
+            print(f"[sync] pull applied {copied} item(s)", flush=True)
+        except Exception as e:
+            print(f"[sync] pull failed (continuing): {e}", flush=True)
 
 
 def sync_push():
@@ -236,33 +241,34 @@ def sync_push():
     if not repo:
         return
     local = SYNC_REPO_LOCAL
-    try:
-        if not os.path.isdir(os.path.join(local, ".git")):
-            return  # nothing to push (pull never succeeded)
-        for rel, src in _sync_spec():
-            dst = os.path.join(local, rel)
-            if os.path.isfile(src):
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
-            elif os.path.isdir(src):
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-        subprocess.run(["git", "-C", local, "add", "-A"], capture_output=True, text=True)
-        st = subprocess.run(["git", "-C", local, "status", "--porcelain"],
-                            capture_output=True, text=True)
-        if not st.stdout.strip():
-            print("[sync] push: no changes", flush=True)
-            return
-        subprocess.run(["git", "-C", local, "commit", "-m",
-                        f"opencode-sync {time.strftime('%Y-%m-%dT%H:%M:%S')}"],
-                       capture_output=True, text=True)
-        subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"],
-                       capture_output=True, text=True)
-        subprocess.run(["git", "-C", local, "push"], check=True)
-        print("[sync] push done", flush=True)
-    except Exception as e:
-        print(f"[sync] push failed (continuing): {e}", flush=True)
+    with _sync_lock:
+        try:
+            if not os.path.isdir(os.path.join(local, ".git")):
+                return  # nothing to push (pull never succeeded)
+            for rel, src in _sync_spec():
+                dst = os.path.join(local, rel)
+                if os.path.isfile(src):
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                elif os.path.isdir(src):
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+            subprocess.run(["git", "-C", local, "add", "-A"], capture_output=True, text=True)
+            st = subprocess.run(["git", "-C", local, "status", "--porcelain"],
+                                capture_output=True, text=True)
+            if not st.stdout.strip():
+                print("[sync] push: no changes", flush=True)
+                return
+            subprocess.run(["git", "-C", local, "commit", "-m",
+                            f"opencode-sync {time.strftime('%Y-%m-%dT%H:%M:%S')}"],
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"],
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", local, "push"], check=True)
+            print("[sync] push done", flush=True)
+        except Exception as e:
+            print(f"[sync] push failed (continuing): {e}", flush=True)
 
 
 def ensure_plugin_sync():
@@ -1029,6 +1035,22 @@ ingress:
     print(bar + "\n")
 
     print("All services started. Keepalive monitor running (checks every 30s)... Ctrl+C to stop.", flush=True)
+
+    # OpenCode config autosave: SIGKILL (e.g. Kaggle Restart / session expiry) cannot be
+    # caught by any signal/atexit handler, so we push periodically while running. A hard
+    # kill then loses at most the last SYNC_INTERVAL seconds of changes (default 300).
+    if sync_repo_name():
+        _sync_interval = int(os.environ.get("SYNC_INTERVAL", "300") or "300")
+        _sync_stop = threading.Event()
+        def _autosave():
+            while not _sync_stop.wait(_sync_interval):
+                try:
+                    sync_push()
+                except Exception:
+                    pass
+        threading.Thread(target=_autosave, name="opencode-sync-autosave", daemon=True).start()
+        print(f"[sync] autosave every {_sync_interval}s (set SYNC_INTERVAL to change; hard-kill resilient)", flush=True)
+
     SERVICES = [
         ("LM Studio :1234", "http://localhost:1234/v1/models", "lms server start --port 1234 --cors", 1234),
         ("Opencode :2456", "http://localhost:2456", "opencode web --port 2456 --hostname 0.0.0.0", 2456),
