@@ -56,6 +56,9 @@
     },
     "opencode": {
       "name": "OpenCode Zen (free)",
+      "options": {
+        "apiKey": "{env:ZEN_API_KEY}"
+      },
       "models": {
         "big-pickle": {
           "tool_call": true
