@@ -148,6 +148,31 @@ def setup_git_auth():
         return False
 
 
+def sync_repo_name():
+    """SYNC_REPO if set, else default to <gh-username>/my-opencode-config.
+    Returns None only if it cannot be resolved (no SYNC_REPO and no gh/git user)."""
+    r = os.getenv("SYNC_REPO")
+    if r:
+        return r
+    try:
+        if shutil.which("gh"):
+            out = subprocess.run(["gh", "api", "user", "--jq", ".login"],
+                                 capture_output=True, text=True)
+            login = out.stdout.strip()
+            if login:
+                return f"{login}/my-opencode-config"
+    except Exception:
+        pass
+    try:
+        nm = subprocess.run(["git", "config", "user.name"],
+                            capture_output=True, text=True).stdout.strip()
+        if nm:
+            return f"{nm}/my-opencode-config"
+    except Exception:
+        pass
+    return None
+
+
 def _sync_spec():
     """(repo-relative-path, local-absolute-path) pairs mirrored by opencode-synced defaults."""
     cfg = os.path.expanduser("~/.config/opencode")
@@ -169,7 +194,7 @@ def _sync_spec():
 
 
 def sync_pull():
-    repo = os.getenv("SYNC_REPO")
+    repo = sync_repo_name()
     if not repo:
         print("[sync] SYNC_REPO not set - skipping pull", flush=True)
         return
@@ -199,7 +224,7 @@ def sync_pull():
 
 
 def sync_push():
-    repo = os.getenv("SYNC_REPO")
+    repo = sync_repo_name()
     if not repo:
         return
     local = SYNC_REPO_LOCAL
@@ -236,7 +261,7 @@ def ensure_plugin_sync():
     """Enable the opencode-synced plugin + write its config so in-IDE /sync-* works."""
     try:
         import json as _json
-        repo = os.getenv("SYNC_REPO")
+        repo = sync_repo_name()
         if not repo:
             return
         cfg_path = os.path.expanduser("~/.config/opencode/opencode.jsonc")
