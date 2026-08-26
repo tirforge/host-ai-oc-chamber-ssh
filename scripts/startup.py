@@ -463,6 +463,36 @@ def main():
     served_model = None  # actual identifier LM Studio serves (populated after load)
     TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
 
+    # --preflight: report resolved config/secrets/tool availability and exit
+    # without installing, downloading models, or starting any service.
+    if "--preflight" in sys.argv or "-n" in sys.argv:
+        print("\n=== PREFLIGHT CHECK (no changes made) ===", flush=True)
+        print(f"DOMAIN        : {DOMAIN or 'MISSING'}", flush=True)
+        print(f"CF_TOKEN      : {'set' if CF_TOKEN else 'MISSING'}", flush=True)
+        print(f"TUNNEL_TOKEN  : {'set' if TUNNEL_TOKEN else 'MISSING'}", flush=True)
+        print(f"PASSWORD      : {'set' if PASSWORD and PASSWORD != 'changeme' else 'changeme (default)'}", flush=True)
+        print(f"SSH_PASSWORD  : {'set' if SSH_PASSWORD and SSH_PASSWORD != 'changeme' else 'fallback to UI password'}", flush=True)
+        print(f"MODEL         : {MODEL}", flush=True)
+        print(f"MODEL_QUANT   : {MODEL_QUANT}", flush=True)
+        print(f"TUNNEL        : {TUNNEL}", flush=True)
+        print(f"SYNC_REPO     : {sync_repo_name()}", flush=True)
+        for t in ["lms", "cloudflared", "opencode", "openchamber", "sshd", "gh", "git"]:
+            print(f"  tool {t:12}: {'FOUND' if shutil.which(t) else 'missing'}", flush=True)
+        print("GPU:", flush=True)
+        try:
+            out = subprocess.run("nvidia-smi -L 2>/dev/null || true", shell=True,
+                                 capture_output=True, text=True).stdout.strip()
+            print(out or "  no nvidia-smi / no GPU visible", flush=True)
+        except Exception:
+            pass
+        missing = []
+        if not DOMAIN:
+            missing.append("CF_DOMAIN")
+        if not CF_TOKEN and not TUNNEL_TOKEN:
+            missing.append("CF_TOKEN/TUNNEL_TOKEN")
+        print("=== PREFLIGHT: " + ("READY" if not missing else f"NEEDS {', '.join(missing)}") + " ===", flush=True)
+        sys.exit(0)
+
     if not DOMAIN:
         print("ERROR: Need CF_DOMAIN (yourdomain.com) set as env/Kaggle secret", flush=True)
         print(f"Got DOMAIN={DOMAIN}", flush=True)
