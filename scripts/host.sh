@@ -55,14 +55,29 @@ if ! lms get "$base" -y && ! lms get "$base"; then
   pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true
   (hf download "$base" $HF_REPO_TYPE --include "*Q4_K_M*" --local-dir "$_dest" </dev/null || huggingface-cli download "$base" $HF_REPO_TYPE --include "*Q4_K_M*" --local-dir "$_dest" </dev/null) || echo "HF direct failed"
 fi
-echo "Starting LM Studio..."
-lms server start --port 1234 --cors &
-# wait for LM Studio before starting dependents
-for i in 1 2 3 4 5 6; do curl -s -m 3 http://localhost:1234/v1/models | grep -q '"data"' && break; sleep 5; echo "waiting LM Studio :1234 ($i)..."; done
+# Engine selection (mirror startup.py): llama-runner if ENGINE=llama-runner or LMS_LOAD_FAILED=1
+ENGINE_MODE="${ENGINE:-lms}"
+if [ "${LMS_LOAD_FAILED:-}" = "1" ]; then ENGINE_MODE="llama-runner"; fi
+if [ "$ENGINE_MODE" = "llama-runner" ] && [ -d /tmp/llama-runner ]; then
+  echo "Starting llama-runner (:1234)..."
+  ( cd /tmp/llama-runner && python main.py --headless ) &
+else
+  echo "Starting LM Studio..."
+  lms server start --port 1234 --cors &
+fi
+# wait for :1234 (either engine) before starting dependents
+for i in 1 2 3 4 5 6; do curl -s -m 3 http://localhost:1234/v1/models | grep -q '"data"' && break; sleep 5; echo "waiting :1234 ($i)..."; done
 echo "Starting Opencode Web (full tool support, port 2456)..."
+# password-safe UP check: credentials via curl --config (no password in argv / no quote-break)
+oc_up() {
+  local pw="${OPENCHAMBER_UI_PASSWORD:-changeme}" cf
+  cf=$(mktemp); printf 'user = opencode:%s\n' "$pw" > "$cf"
+  curl -s -m 3 -o /dev/null -w "%{http_code}" --config "$cf" http://localhost:2456
+  rm -f "$cf"
+}
 # reuse if already listening, else start; opencode web requires user=opencode / pass=OPENCODE_SERVER_PASSWORD
 # reuse only if current password accepted (stale instance with old password -> restart)
-if curl -s -m 3 -o /dev/null -w "%{http_code}" -u "opencode:${OPENCHAMBER_UI_PASSWORD:-changeme}" http://localhost:2456 | grep -q "200"; then echo "Opencode :2456 already UP (password OK)"; else
+if [ "$(oc_up)" = "200" ]; then echo "Opencode :2456 already UP (password OK)"; else
   [ -n "$(ss -tlnp 2>/dev/null | grep ':2456 ')" ] && { echo "killing stale :2456"; fuser -k 2456/tcp 2>/dev/null || true; sleep 2; }
   OPENCODE_SERVER_PASSWORD="${OPENCHAMBER_UI_PASSWORD:-changeme}" opencode web --port 2456 --hostname 0.0.0.0 &
 fi
