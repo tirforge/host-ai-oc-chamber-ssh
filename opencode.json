@@ -77,6 +77,24 @@
         },
         "x-preview-f-free": {
           "tool_call": true
+        },
+        "deepseek-v4-flash-free": {
+          "tool_call": true
+        },
+        "ling-3.0-flash-free": {
+          "tool_call": true
+        },
+        "ling-3.0-tiny-free": {
+          "tool_call": true
+        },
+        "north-mini-code-free": {
+          "tool_call": true
+        },
+        "laguna-s-2.1-free": {
+          "tool_call": true
+        },
+        "longcat-2.0-free": {
+          "tool_call": true
         }
       }
     }
