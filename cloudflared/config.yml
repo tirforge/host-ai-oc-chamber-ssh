@@ -1,5 +1,5 @@
 tunnel: t4host
-credentials-file: ~/.cloudflared/<TUNNEL_ID>.json
+# credentials-file: ~/.cloudflared/<TUNNEL_ID>.json  # omitted in token mode (startup.py writes real path when --token not used)
 ingress:
   - hostname: ai.yourdomain.com
     service: http://localhost:1234

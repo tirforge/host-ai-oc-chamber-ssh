@@ -149,13 +149,14 @@ At the end of a successful run, `startup.py` prints a summary, e.g.:
   Model (served) : qwen3-coder-30b-a3b-instruct
   Context / Out  : 48K / 32K tokens  (64K OOMs on dual T4)
   CONNECT
-   OpenCode Web  : https://oc.yourdomain.com   (password: <ui_pw>)
+   OpenCode Web  : https://oc.yourdomain.com   (user: opencode  password: <ui_pw>)
    OpenChamber   : https://chamber.yourdomain.com  (password: <ui_pw>)
    AI endpoint   : https://ai.yourdomain.com/v1
    SSH           : ssh root@ssh.yourdomain.com   (password: <ssh_pw>)
    SSH (1-liner) : ssh-keygen -R ssh.yourdomain.com && ssh -o StrictHostKeyChecking=no root@ssh.yourdomain.com
-   Local         : opencode :2456 | openchamber :3000 | lmstudio :1234
+   Local         : opencode :2456 (auth opencode:<ui_pw>) | openchamber :3000 | lmstudio :1234
 ```
+> **Auth note:** `oc.yourdomain.com` uses `opencode web` `OPENCODE_SERVER_PASSWORD` (`Basic` auth `user: opencode` / `pass: OPENCHAMBER_UI_PASSWORD`). `curl -u opencode:<pw> https://oc.yourdomain.com` or browser `opencode`/`aarsha`. `401` without `opencode` user is **UP**, not down — `502` is down.
 
 ## API token note (tunneled provider)
 

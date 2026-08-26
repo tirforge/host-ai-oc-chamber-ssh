@@ -1,37 +1,82 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-lmstudio@1.0.0-rc.2"],
+  "plugin": [
+    "opencode-lmstudio@1.0.0-rc.2"
+  ],
   "lsp": {
-    "pyright": { "disabled": true },
+    "pyright": {
+      "disabled": true
+    },
     "python": {
-      "command": ["pylsp"],
-      "extensions": [".py"]
+      "command": [
+        "pylsp"
+      ],
+      "extensions": [
+        ".py"
+      ]
     }
   },
   "provider": {
     "lmstudio-local": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "LM Studio (local)",
-      "options": { "baseURL": "http://localhost:1234/v1" },
+      "options": {
+        "baseURL": "http://localhost:1234/v1"
+      },
       "models": {
         "qwen3-coder-30b-a3b-instruct": {
-          "name": "Qwen3 Coder 30B A3B Instruct (default)",
+          "name": "qwen3-coder-30b-a3b-instruct",
           "tool_call": true,
           "reasoning": true,
-          "limit": { "context": 49152, "output": 32768 }
+          "limit": {
+            "context": 49152,
+            "output": 32768
+          }
         }
       }
     },
     "lmstudio-tunneled": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "LM Studio (tunneled)",
-      "options": { "baseURL": "https://ai.yourdomain.com/v1", "apiKey": "{env:LM_API_TOKEN}" },
+      "options": {
+        "baseURL": "https://ai.yourdomain.com/v1",
+        "apiKey": "{env:LM_API_TOKEN}"
+      },
       "models": {
         "qwen3-coder-30b-a3b-instruct": {
-          "name": "Qwen3 Coder 30B A3B Instruct (default)",
+          "name": "qwen3-coder-30b-a3b-instruct",
           "tool_call": true,
           "reasoning": true,
-          "limit": { "context": 49152, "output": 32768 }
+          "limit": {
+            "context": 49152,
+            "output": 32768
+          }
+        }
+      }
+    },
+    "opencode": {
+      "name": "OpenCode Zen (free)",
+      "models": {
+        "big-pickle": {
+          "tool_call": true
+        },
+        "hy3-free": {
+          "tool_call": true
+        },
+        "mimo-v2.5-free": {
+          "tool_call": true
+        },
+        "muse-spark-1.2-contributor-free": {
+          "tool_call": true
+        },
+        "nemotron-3-ultra-free": {
+          "tool_call": true
+        },
+        "nemotron-3.5-lightning-free": {
+          "tool_call": true
+        },
+        "x-preview-f-free": {
+          "tool_call": true
         }
       }
     }

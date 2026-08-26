@@ -560,10 +560,6 @@ def main():
         print("lms missing", flush=True)
 
     time.sleep(1)
-    # kill stale port holders from previous runs (prevents opencode/openchamber DOWN)
-    for port in [2456, 3000]:
-        run(f"fuser -k {port}/tcp 2>/dev/null || true")
-    time.sleep(1)
     # Make the OpenCode config discoverable by ALL instances. OpenChamber launches its
     # own managed OpenCode with cwd=/root (and the web instance with cwd=/kaggle/working),
     # so neither ever sees this repo's opencode.json (OpenCode only searches cwd + ancestors).
@@ -581,15 +577,22 @@ def main():
             try:
                 _models = _json_loads_url("http://localhost:1234/v1/models").get("data", [])
                 _served = _models[0]["id"] if _models else None
-                if _served:
+                # only trust a real LLM (skip embedding-only servers, e.g. fresh installs serving just nomic-embed)
+                if _served and "embed" not in _served.lower():
                     for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                         m = cfg["provider"][prov].setdefault("models", {})
                         m.clear()
                         m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
                     print(f"opencode model id corrected -> {_served}", flush=True)
                     served_model = _served
+                    # local chat model available -> prefer it as default over free zen fallback
+                    cfg["model"] = f"lmstudio-local/{_served}"
             except Exception as e:
                 print(f"model-id correction skipped (LM Studio not reachable?): {e}", flush=True)
+            # Default model: free opencode zen model so pickers always have a working default
+            # even when LM Studio is still downloading / embedding-only.
+            if not cfg.get("model"):
+                cfg["model"] = "opencode/big-pickle"
             dst_dir = os.path.expanduser("~/.config/opencode")
             os.makedirs(dst_dir, exist_ok=True)
             dst = os.path.join(dst_dir, "opencode.jsonc")
@@ -598,26 +601,79 @@ def main():
     except Exception as e:
         print(f"opencode config copy skipped: {e}", flush=True)
 
+    # Kill stale port holders only if port is held by non-opencode/openchamber process.
+    # Previously blind fuser -k 2456/3000 killed the tunnel origin mid-flight -> oc 502.
+    def _kill_stale(port, expected):
+        try:
+            out = subprocess.run(f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '", shell=True, capture_output=True, text=True).stdout
+            if out and expected not in out:
+                print(f"Port {port} held by unexpected process, killing stale holder: {out.strip()[:120]}", flush=True)
+                run(f"fuser -k {port}/tcp 2>/dev/null || true")
+                time.sleep(1)
+            elif out:
+                print(f"Port {port} already held by {expected}, keeping", flush=True)
+        except Exception:
+            pass
+
+    _kill_stale(2456, "opencode")
+    _kill_stale(3000, "node")
+
     if shutil.which("opencode"):
         os.environ["OPENCODE_SERVER_PASSWORD"] = PASSWORD  # secure opencode web (fixes unsecured warning)
-        run_bg(f'opencode web --port 2456 --hostname 0.0.0.0', "opencode:2456")
-        wait_http("http://localhost:2456", tries=6, name="Opencode :2456")
+        # If already listening, reuse; else start
+        if not wait_http("http://localhost:2456", tries=2, name="Opencode :2456 (existing)"):
+            run_bg(f'opencode web --port 2456 --hostname 0.0.0.0', "opencode:2456")
+            wait_http("http://localhost:2456", tries=6, name="Opencode :2456")
     else:
         print("opencode missing, install via: curl -fsSL https://opencode.ai/install | bash", flush=True)
 
     if shutil.which("openchamber"):
-        run_bg('openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', "openchamber:3000")
-        wait_http("http://localhost:3000", tries=6, name="OpenChamber :3000")
+        if not wait_http("http://localhost:3000", tries=2, name="OpenChamber :3000 (existing)"):
+            run_bg('openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', "openchamber:3000")
+            wait_http("http://localhost:3000", tries=6, name="OpenChamber :3000")
+    else:
+        print("openchamber missing", flush=True)
 
-    time.sleep(3)
+    time.sleep(1)
 
     # 3. Cloudflare tunnel - 4 ingress: ai, oc, chamber, ssh
+    # For --token mode cloudflared ignores credentials-file, but for cert mode it must not point to missing file.
     config_path = os.path.expanduser("~/.cloudflared/config.yml")
+    # Only use credentials-file if the file actually exists; otherwise omit it (token mode)
+    from pathlib import Path as _Path
+    token_mode = bool(TUNNEL_TOKEN and TUNNEL_TOKEN.startswith("eyJ") and TUNNEL_TOKEN.count(".") >= 2)
+    # In token mode, credentials-file is ignored; in cert mode try to find real file
     cred_path = os.path.expanduser(f"~/.cloudflared/{TUNNEL}.json")
+    real_cred = None
+    for cand in [cred_path, os.path.expanduser(f"~/.cloudflared/{TUNNEL}.json"), f"/root/.cloudflared/{TUNNEL}.json"]:
+        if _Path(cand).exists():
+            real_cred = cand
+            break
+    # If no real cred file and not in token mode, try to find any json for this tunnel ID
+    if not real_cred and not token_mode:
+        import glob as _glob_tmp
+        for jf in _glob_tmp.glob(os.path.expanduser("~/.cloudflared/*.json")):
+            real_cred = jf
+            break
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     # always ensure config reflects current DOMAIN/TUNNEL (fix stale ~/.cloudflared/config.yml)
-    cfg = f"""tunnel: {TUNNEL}
-credentials-file: {cred_path}
+    if real_cred or not token_mode:
+        cfg = f"""tunnel: {TUNNEL}
+credentials-file: {real_cred or cred_path}
+ingress:
+  - hostname: ai.{DOMAIN}
+    service: http://localhost:1234
+  - hostname: oc.{DOMAIN}
+    service: http://localhost:2456
+  - hostname: chamber.{DOMAIN}
+    service: http://localhost:3000
+  - hostname: ssh.{DOMAIN}
+    service: ssh://localhost:22
+  - service: http_status:404
+"""
+    else:
+        # Token mode: omit credentials-file so `cloudflared tunnel list` error is avoided and tunnel uses --token
+        cfg = f"""tunnel: {TUNNEL}
 ingress:
   - hostname: ai.{DOMAIN}
     service: http://localhost:1234
@@ -630,7 +686,7 @@ ingress:
   - service: http_status:404
 """
     open(config_path, "w").write(cfg)
-    print(f"Wrote {config_path}", flush=True)
+    print(f"Wrote {config_path} ({'token mode, no credentials-file' if token_mode and not real_cred else f'credentials-file={real_cred or cred_path}'})", flush=True)
 
     if shutil.which("cloudflared"):
         # cfut_ is API token, eyJ... is JWT tunnel token
@@ -687,12 +743,12 @@ ingress:
     print(f"  Context / Out  : 48K / 32K tokens  (64K OOMs on dual T4)")
     print("-" * 64)
     print("  CONNECT")
-    print(f"   OpenCode Web  : https://oc.{DOMAIN}   (password: {ui_pw})")
+    print(f"   OpenCode Web  : https://oc.{DOMAIN}   (user: opencode  password: {ui_pw})")
     print(f"   OpenChamber   : https://chamber.{DOMAIN}  (password: {ui_pw})")
     print(f"   AI endpoint   : https://ai.{DOMAIN}/v1")
     print(f"   SSH           : ssh root@ssh.{DOMAIN}   (password: {ssh_pw})")
     print(f"   SSH (1-liner) : ssh-keygen -R ssh.{DOMAIN} && ssh -o StrictHostKeyChecking=no root@ssh.{DOMAIN}")
-    print(f"   Local         : opencode :2456 | openchamber :3000 | lmstudio :1234")
+    print(f"   Local         : opencode :2456 (auth opencode:{ui_pw}) | openchamber :3000 | lmstudio :1234")
     print("-" * 64)
     print(f"  LOGS: service logs in /tmp/<name>.log (e.g. /tmp/lmstudio:1234.log, /tmp/opencode:2456.log)")
     print(bar + "\n")
@@ -724,13 +780,22 @@ ingress:
                     print(f"[{time.strftime('%H:%M:%S')}] {nm}: {tag} (http {c})", flush=True)
                 last[nm] = ok
                 status.append(f"{nm.split(' :')[1].strip(':')}={'OK' if ok else 'DOWN'}")
-                # auto-restart service after 2 consecutive DOWNs
+                # auto-restart service after 2 consecutive DOWNs - verify port holder first to avoid killing tunnel origin unnecessarily
                 if not ok:
                     down_count[nm] = down_count.get(nm, 0) + 1
                     if down_count[nm] >= 2:
-                        print(f"{nm} DOWN x{down_count[nm]} -> restarting...", flush=True)
-                        run(f"fuser -k {port}/tcp 2>/dev/null || true")
-                        run_bg(cmd, f"{nm.split(' :')[1].strip(':')}-restart")
+                        # Check who holds the port before killing
+                        holder = subprocess.run(f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '", shell=True, capture_output=True, text=True).stdout
+                        # Only kill if not the expected service (prevents tunnel 502 blip when service is already restarting)
+                        expected_map = {2456: "opencode", 3000: "node", 1234: "lmstudio"}
+                        expected = expected_map.get(port, "")
+                        if holder and expected and expected in holder:
+                            print(f"{nm} DOWN x{down_count[nm]} but port {port} still held by {expected}, not killing", flush=True)
+                        else:
+                            print(f"{nm} DOWN x{down_count[nm]} -> restarting... (holder: {holder.strip()[:80] or 'none'})", flush=True)
+                            run(f"fuser -k {port}/tcp 2>/dev/null || true")
+                            time.sleep(1)
+                            run_bg(cmd, f"{nm.split(' :')[1].strip(':')}-restart")
                         down_count[nm] = 0
                 else:
                     down_count[nm] = 0

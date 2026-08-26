@@ -56,12 +56,16 @@ if ! lms get "$base" -y && ! lms get "$base"; then
 fi
 echo "Starting LM Studio..."
 lms server start --port 1234 --cors &
+# wait for LM Studio before starting dependents
+for i in 1 2 3 4 5 6; do curl -s -m 3 http://localhost:1234/v1/models | grep -q '"data"' && break; sleep 5; echo "waiting LM Studio :1234 ($i)..."; done
 echo "Starting Opencode Web (full tool support, port 2456)..."
-opencode web --port 2456 --hostname 0.0.0.0 &
+# reuse if already listening, else start; opencode web requires user=opencode / pass=OPENCODE_SERVER_PASSWORD
+if curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:2456 | grep -qE "200|401"; then echo "Opencode :2456 already UP"; else OPENCODE_SERVER_PASSWORD="${OPENCHAMBER_UI_PASSWORD:-changeme}" opencode web --port 2456 --hostname 0.0.0.0 & fi
+for i in 1 2 3 4 5 6; do code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:2456); echo "oc check $i: $code"; echo "$code" | grep -qE "200|401" && break; sleep 3; done
 echo "Starting OpenChamber..."
-openchamber --ui-password "${OPENCHAMBER_UI_PASSWORD:-changeme}" &
-sleep 2
-echo "Starting Cloudflare tunnel $TUNNEL for ai.$DOMAIN oc.$DOMAIN chamber.$DOMAIN ssh.$DOMAIN"
+if curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:3000 | grep -q "200"; then echo "OpenChamber :3000 already UP"; else openchamber --ui-password "${OPENCHAMBER_UI_PASSWORD:-changeme}" & fi
+for i in 1 2 3 4 5 6; do code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:3000); echo "chamber check $i: $code"; [ "$code" = "200" ] && break; sleep 3; done
+echo "Starting Cloudflare tunnel $TUNNEL for ai.$DOMAIN oc.$DOMAIN chamber.$DOMAIN ssh.$DOMAIN (after origins UP)"
 cloudflared tunnel run $TUNNEL
 
 # Receiver side (laptop) SSH:
