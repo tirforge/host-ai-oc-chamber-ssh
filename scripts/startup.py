@@ -77,6 +77,16 @@ def run(cmd):
     r = subprocess.run(cmd, shell=True)
     return r.returncode == 0
 
+def set_password(user, pw):
+    # Set a user's password via chpasswd stdin so the secret never appears in `ps`
+    # (avoids `echo "user:pass" | chpasswd`, where the password is visible as argv).
+    try:
+        binp = shutil.which("chpasswd") or "/usr/sbin/chpasswd"
+        subprocess.run([binp], input=f"{user}:{pw}\n".encode(), capture_output=True, check=False)
+        return True
+    except Exception:
+        return False
+
 
 def ensure_tool(name, install_cmd):
     if shutil.which(name):
@@ -262,7 +272,7 @@ def main():
         ssh_user = os.getenv("USER") or "root"
         for u in list({ssh_user, "root"}):
             if run(f"id -u {u} >/dev/null 2>&1"):
-                run(f'echo "{u}:{SSH_PASSWORD.strip()}" | chpasswd 2>&1 || true')
+                set_password(u, SSH_PASSWORD.strip())
                 print(f"SSH password set for {u}", flush=True)
             else:
                 print(f"User {u} not found, skipping chpasswd", flush=True)
@@ -273,7 +283,7 @@ def main():
             ssh_user = os.getenv("USER") or "root"
             for u in list({ssh_user, "root"}):
                 if run(f"id -u {u} >/dev/null 2>&1"):
-                    run(f'echo "{u}:{PASSWORD}" | chpasswd 2>&1 || true')
+                    set_password(u, PASSWORD)
                     print(f"SSH password set for {u} (from OPENCHAMBER_UI_PASSWORD)", flush=True)
         else:
             print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
@@ -766,7 +776,7 @@ ingress:
     print(f"  Model (HF)     : {MODEL}")
     print(f"  Quant          : {MODEL_QUANT}  (override via MODEL_QUANT)")
     print(f"  Model (served) : {model_line}")
-    print(f"  Context / Out  : 48K / 32K tokens  (64K OOMs on dual T4)")
+    print(f"  Context / Out  : 190K / 32K tokens  (int8/q8_0 KV; verified fits dual T4)")
     print("-" * 64)
     print("  CONNECT")
     print(f"   OpenCode Web  : https://oc.{DOMAIN}   (user: opencode  password: {ui_pw})")
