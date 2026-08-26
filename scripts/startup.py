@@ -346,7 +346,7 @@ def main():
                     os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
         run("node --version; npm --version || true")
         # now install openchamber with Node 22 in PATH
-        run("bash -c 'export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env 2>/dev/null)\" || true; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 2>/dev/null || true; node --version; curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash' || curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
+        run("bash -c 'export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env 2>/dev/null)\" || true; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 2>/dev/null || true; node --version; curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/v1.20.0/scripts/install.sh | bash' || curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/v1.20.0/scripts/install.sh | bash")
 
     # 1. Pull model (LM Studio) - try HF repo, fallback to alias
     if shutil.which("lms"):
@@ -407,7 +407,7 @@ def main():
                             # llmster headless often fails multi-GPU split (bug tracker #1360/#1365:
                             # "tensor split 0 -> disabling GPU", or all weights on CUDA0 -> OOM)
                             os.environ["LMS_LOAD_FAILED"] = "1"
-                            print("All lms load attempts OOMed - will fall back to Ollama engine (proper multi-GPU split)", flush=True)
+                            print("All lms load attempts OOMed - will fall back to llama-runner engine (pwilkin/llama-runner, proper multi-GPU split)", flush=True)
                     else:
                         g0 = max(ggufs, key=os.path.getsize)
                         print(f"Key not found via lms ls; relying on JIT auto-load of {os.path.basename(g0)}", flush=True)
