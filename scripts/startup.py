@@ -925,7 +925,7 @@ def main():
     # In token mode, credentials-file is ignored; in cert mode try to find real file
     cred_path = os.path.expanduser(f"~/.cloudflared/{TUNNEL}.json")
     real_cred = None
-    for cand in [cred_path, os.path.expanduser(f"~/.cloudflared/{TUNNEL}.json"), f"/root/.cloudflared/{TUNNEL}.json"]:
+    for cand in [cred_path, f"/root/.cloudflared/{TUNNEL}.json"]:
         if _Path(cand).exists():
             real_cred = cand
             break
@@ -1051,13 +1051,18 @@ ingress:
         threading.Thread(target=_autosave, name="opencode-sync-autosave", daemon=True).start()
         print(f"[sync] autosave every {_sync_interval}s (set SYNC_INTERVAL to change; hard-kill resilient)", flush=True)
 
+    # Engine-aware restart command for :1234 (llama-runner when GGUF_PATH is set, else LM Studio)
+    engine_is_llama = bool(os.environ.get("GGUF_PATH"))
+    restart_1234 = ("cd /tmp/llama-runner && python main.py --headless"
+                    if engine_is_llama else "lms server start --port 1234 --cors")
     SERVICES = [
-        ("LM Studio :1234", "http://localhost:1234/v1/models", "lms server start --port 1234 --cors", 1234),
+        ("LM Studio :1234", "http://localhost:1234/v1/models", restart_1234, 1234),
         ("Opencode :2456", "http://localhost:2456", "opencode web --port 2456 --hostname 0.0.0.0", 2456),
         ("OpenChamber :3000", "http://localhost:3000", 'openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', 3000),
     ]
     last = {}
     down_count = {}
+    _last_restart = {}
     tick = 0
     try:
         while True:
@@ -1077,22 +1082,30 @@ ingress:
                     print(f"[{time.strftime('%H:%M:%S')}] {nm}: {tag} (http {c})", flush=True)
                 last[nm] = ok
                 status.append(f"{nm.split(' :')[1].strip(':')}={'OK' if ok else 'DOWN'}")
-                # auto-restart service after 2 consecutive DOWNs - verify port holder first to avoid killing tunnel origin unnecessarily
+                # auto-restart service after 2 consecutive DOWNs.
+                # port free -> service crashed -> restart. port held by the expected
+                # process -> either still starting (grace) or hung (after grace) -> kill+restart.
+                # port held by something else -> kill+restart to reclaim it.
                 if not ok:
                     down_count[nm] = down_count.get(nm, 0) + 1
                     if down_count[nm] >= 2:
-                        # Check who holds the port before killing
-                        holder = subprocess.run(f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '", shell=True, capture_output=True, text=True).stdout
-                        # Only kill if not the expected service (prevents tunnel 502 blip when service is already restarting)
-                        expected_map = {2456: ("opencode",), 3000: ("node", "openchamber"), 1234: ("lmstudio", "llmster")}
+                        holder = subprocess.run(
+                            f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '",
+                            shell=True, capture_output=True, text=True).stdout
+                        expected_map = {2456: ("opencode",), 3000: ("node", "openchamber"),
+                                        1234: ("lmstudio", "llmster", "python", "llama-server")}
                         expected = expected_map.get(port, ())
-                        if holder and expected and any(e in holder for e in expected):
-                            print(f"{nm} DOWN x{down_count[nm]} but port {port} still held by {expected}, not killing", flush=True)
+                        held_by_expected = bool(holder) and expected and any(e in holder for e in expected)
+                        since_restart = time.time() - _last_restart.get(port, 0)
+                        if held_by_expected and since_restart < 120:
+                            # still within startup grace (e.g. large model loading) - wait
+                            print(f"{nm} DOWN x{down_count[nm]} but {expected} still starting (grace {int(since_restart)}s) - waiting", flush=True)
                         else:
-                            print(f"{nm} DOWN x{down_count[nm]} -> restarting... (holder: {holder.strip()[:80] or 'none'})", flush=True)
+                            print(f"{nm} DOWN x{down_count[nm]} -> restarting (holder: {holder.strip()[:80] or 'none'})", flush=True)
                             run(f"fuser -k {port}/tcp 2>/dev/null || true")
                             time.sleep(1)
                             run_bg(cmd, f"{nm.split(' :')[1].strip(':')}-restart")
+                            _last_restart[port] = time.time()
                         down_count[nm] = 0
                 else:
                     down_count[nm] = 0

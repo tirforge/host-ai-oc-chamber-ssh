@@ -13,7 +13,7 @@ def load_startup():
         if k.upper() in ("MODEL", "MODEL_NAME", "MODEL_QUANT"):
             os.environ.pop(k, None)
     src = open("scripts/startup.py").read()
-    exec_globals = {}
+    exec_globals = {"__file__": "scripts/startup.py"}
     exec(compile(src.split("def main():")[0], "scripts/startup.py", "exec"), exec_globals)
     return exec_globals["get_secret"]
 
@@ -92,7 +92,7 @@ def test_startup_import_main():
     spec = importlib.util.spec_from_file_location("startup_main", "scripts/startup.py")
     mod = importlib.util.module_from_spec(spec)
     src = open("scripts/startup.py").read()
-    globs = {}
+    globs = {"__file__": "scripts/startup.py"}
     # exec whole file - top-level now only defines functions, main not auto-called
     exec(compile(src, "scripts/startup.py", "exec"), globs)
     assert "main" in globs
