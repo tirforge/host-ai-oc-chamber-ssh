@@ -13,6 +13,10 @@ Env secrets (set in Kaggle Secrets -> Add-ons -> Secrets):
   MODEL  (default: lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF)
   TUNNEL_NAME (default: t4host)
   LM_API_TOKEN (optional, for ai subdomain auth)
+  SYNC_REPO (optional, e.g. tirforge/my-opencode-config) - if set, opencode-synced
+    pulls your OpenCode global config at session start and pushes it at stop
+    (persists config across Kaggle's ephemeral disks). Needs a GitHub token
+    in GH_TOKEN/ACCESS_TOKEN with repo scope; the repo must already exist.
 
 Run: python scripts/startup.py
 """
@@ -88,6 +92,160 @@ def ensure_tool(name, install_cmd):
         if p not in os.environ.get("PATH", ""):
             os.environ["PATH"] = f"{p}:{os.environ.get('PATH','')}"
     return shutil.which(name) is not None
+
+# ---------------------------------------------------------------------------
+# opencode-synced integration (persist OpenCode global config across Kaggle
+# sessions via a private GitHub repo). Active only when SYNC_REPO is set
+# (e.g. "tirforge/my-opencode-config"). The plugin (opencode-synced) handles
+# live sync inside OpenCode; these helpers drive the lifecycle at session
+# boundaries (pull at start, push at stop) so config survives ephemeral disks.
+# ---------------------------------------------------------------------------
+SYNC_REPO_LOCAL = os.path.expanduser("~/.local/share/opencode/opencode-synced/repo")
+
+
+def setup_git_auth():
+    """Auth git/gh with a GitHub token so the sync repo can be cloned/pushed.
+    Token is passed via stdin / credential helper (never on the command line)."""
+    tok = (os.getenv("GH_TOKEN") or os.getenv("ACCESS_TOKEN")
+           or get_secret("GITHUB_TOKEN") or get_secret("GH_TOKEN"))
+    if not tok:
+        print("[sync] no GitHub token found (GH_TOKEN/ACCESS_TOKEN) - sync disabled", flush=True)
+        return False
+    try:
+        subprocess.run(["git", "config", "--global", "user.email", "sync@opencode.local"],
+                       capture_output=True)
+        subprocess.run(["git", "config", "--global", "user.name", "opencode-sync"],
+                       capture_output=True)
+        if shutil.which("gh"):
+            subprocess.run(["gh", "auth", "login", "--with-token"], input=tok,
+                           text=True, capture_output=True)
+            subprocess.run(["gh", "auth", "setup-git"], capture_output=True)
+        else:
+            cred = os.path.expanduser("~/.git-credentials")
+            with open(cred, "w") as f:
+                f.write(f"https://{tok}:@github.com\n")
+            os.chmod(cred, 0o600)
+            subprocess.run(["git", "config", "--global", "credential.helper", "store"],
+                           capture_output=True)
+        return True
+    except Exception as e:
+        print(f"[sync] git auth setup failed: {e}", flush=True)
+        return False
+
+
+def _sync_spec():
+    """(repo-relative-path, local-absolute-path) pairs mirrored by opencode-synced defaults."""
+    cfg = os.path.expanduser("~/.config/opencode")
+    home = os.path.expanduser("~")
+    return [
+        ("opencode.json", os.path.join(cfg, "opencode.json")),
+        ("opencode.jsonc", os.path.join(cfg, "opencode.jsonc")),
+        ("AGENTS.md", os.path.join(cfg, "AGENTS.md")),
+        ("agent", os.path.join(cfg, "agent")),
+        ("command", os.path.join(cfg, "command")),
+        ("mode", os.path.join(cfg, "mode")),
+        ("tool", os.path.join(cfg, "tool")),
+        ("themes", os.path.join(cfg, "themes")),
+        ("plugin", os.path.join(cfg, "plugin")),
+        ("skills", os.path.join(cfg, "skills")),
+        ("agents", os.path.join(home, ".agents")),
+        ("model.json", os.path.join(home, ".local/state/opencode/model.json")),
+    ]
+
+
+def sync_pull():
+    repo = os.getenv("SYNC_REPO")
+    if not repo:
+        print("[sync] SYNC_REPO not set - skipping pull", flush=True)
+        return
+    local = SYNC_REPO_LOCAL
+    try:
+        if not os.path.isdir(os.path.join(local, ".git")):
+            url = f"https://github.com/{repo}.git"
+            print(f"[sync] cloning {repo} ...", flush=True)
+            subprocess.run(["git", "clone", "--depth", "1", url, local], check=True)
+        else:
+            subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"], check=True)
+        copied = 0
+        for rel, dst in _sync_spec():
+            src = os.path.join(local, rel)
+            if os.path.isfile(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                copied += 1
+            elif os.path.isdir(src):
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+                copied += 1
+        print(f"[sync] pull applied {copied} item(s)", flush=True)
+    except Exception as e:
+        print(f"[sync] pull failed (continuing): {e}", flush=True)
+
+
+def sync_push():
+    repo = os.getenv("SYNC_REPO")
+    if not repo:
+        return
+    local = SYNC_REPO_LOCAL
+    try:
+        if not os.path.isdir(os.path.join(local, ".git")):
+            return  # nothing to push (pull never succeeded)
+        for rel, src in _sync_spec():
+            dst = os.path.join(local, rel)
+            if os.path.isfile(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+            elif os.path.isdir(src):
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+        subprocess.run(["git", "-C", local, "add", "-A"], capture_output=True, text=True)
+        st = subprocess.run(["git", "-C", local, "status", "--porcelain"],
+                            capture_output=True, text=True)
+        if not st.stdout.strip():
+            print("[sync] push: no changes", flush=True)
+            return
+        subprocess.run(["git", "-C", local, "commit", "-m",
+                        f"opencode-sync {time.strftime('%Y-%m-%dT%H:%M:%S')}"],
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"],
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", local, "push"], check=True)
+        print("[sync] push done", flush=True)
+    except Exception as e:
+        print(f"[sync] push failed (continuing): {e}", flush=True)
+
+
+def ensure_plugin_sync():
+    """Enable the opencode-synced plugin + write its config so in-IDE /sync-* works."""
+    try:
+        import json as _json
+        repo = os.getenv("SYNC_REPO")
+        if not repo:
+            return
+        cfg_path = os.path.expanduser("~/.config/opencode/opencode.jsonc")
+        if not os.path.exists(cfg_path):
+            return
+        cfg = _json.load(open(cfg_path))
+        plugs = cfg.setdefault("plugin", [])
+        if isinstance(plugs, list) and "opencode-synced" not in plugs:
+            plugs.append("opencode-synced")
+            _json.dump(cfg, open(cfg_path, "w"), indent=2)
+        owner, _, name = repo.partition("/")
+        if not name:
+            name = "my-opencode-config"
+        sc = {
+            "repo": {"owner": owner, "name": name, "branch": "main"},
+            "includeSecrets": False,
+            "includeSessions": False,
+        }
+        with open(os.path.expanduser("~/.config/opencode/opencode-synced.jsonc"), "w") as f:
+            _json.dump(sc, f, indent=2)
+        print("[sync] opencode-synced plugin enabled + config written", flush=True)
+    except Exception as e:
+        print(f"[sync] plugin enable skipped: {e}", flush=True)
+
 
 def cf_api_named_tunnel(cf_token, domain, tunnel_name):
     """Create named tunnel + DNS + ingress entirely via Cloudflare API (no cert.pem/browser).
@@ -177,6 +335,19 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
 
 
 def main():
+    # opencode-synced: push config to GitHub when this process stops (graceful exit/SIGTERM).
+    import atexit as _atexit, signal as _sig
+    _atexit.register(sync_push)
+
+    def _on_term(_s, _f):
+        try:
+            sync_push()
+        finally:
+            os._exit(0)
+    try:
+        _sig.signal(_sig.SIGTERM, _on_term)
+    except Exception:
+        pass
     # Export PATH before any which checks (fixes lms/opencode not found after install)
     for p in [os.path.expanduser("~/.lmstudio/bin"), os.path.expanduser("~/.opencode/bin"), os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
         if p not in os.environ.get("PATH", ""):
@@ -325,6 +496,7 @@ def main():
                 os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
     ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"; lms daemon up || true")
     ensure_tool("cloudflared", "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared || true")
+    ensure_tool("gh", "curl -fsSL https://cli.github.com/install.sh | bash || true")
     # opencode: npm -g is main, script as fallback (as you requested)
     ensure_tool("opencode", "npm install -g opencode-ai || bun install -g opencode-ai || curl -fsSL https://opencode.ai/install | bash || true; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
     # openchamber needs Node 22+ - ensure Node 22 is active before install (use nodesource for Kaggle)
@@ -347,6 +519,13 @@ def main():
         run("node --version; npm --version || true")
         # now install openchamber with Node 22 in PATH
         run("bash -c 'export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env 2>/dev/null)\" || true; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 2>/dev/null || true; node --version; curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash' || curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
+
+    # opencode-synced: authenticate git/gh, then PULL synced config at session start
+    try:
+        if setup_git_auth():
+            sync_pull()
+    except Exception as e:
+        print(f"[sync] init skipped: {e}", flush=True)
 
     # 1. Pull model (LM Studio) - try HF repo, fallback to alias
     if shutil.which("lms"):
@@ -567,7 +746,11 @@ def main():
     try:
         import json as _json, shutil as _shutil
         src = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
-        if os.path.exists(src):
+        dst_dir = os.path.expanduser("~/.config/opencode")
+        dst = os.path.join(dst_dir, "opencode.jsonc")
+        if os.path.exists(dst):
+            print("opencode config already present (synced) - skipping host seed copy", flush=True)
+        elif os.path.exists(src):
             cfg = _json.load(open(src))
             # point the tunneled provider at the real domain (config ships with a placeholder)
             if "lmstudio-tunneled" in cfg.get("provider", {}):
@@ -593,11 +776,11 @@ def main():
             # even when LM Studio is still downloading / embedding-only.
             if not cfg.get("model"):
                 cfg["model"] = "opencode/big-pickle"
-            dst_dir = os.path.expanduser("~/.config/opencode")
             os.makedirs(dst_dir, exist_ok=True)
-            dst = os.path.join(dst_dir, "opencode.jsonc")
             _json.dump(cfg, open(dst, "w"), indent=2)
             print(f"Copied opencode config -> {dst} (tunneled baseURL https://ai.{DOMAIN}/v1)", flush=True)
+        # Enable opencode-synced plugin + write its config (no-op unless SYNC_REPO set)
+        ensure_plugin_sync()
     except Exception as e:
         print(f"opencode config copy skipped: {e}", flush=True)
 
@@ -822,6 +1005,7 @@ ingress:
                 print(f"[{time.strftime('%H:%M:%S')}] keepalive #{tick}: {' '.join(status)} | listening: {len(listeners)} ports", flush=True)
     except KeyboardInterrupt:
         print("Stopping...", flush=True)
+        sync_push()
         for p in tunnels:
             p.terminate()
 
