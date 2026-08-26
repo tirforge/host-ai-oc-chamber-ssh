@@ -49,7 +49,7 @@ def run_bg(cmd, name):
     # setsid + detached + logfile: survives parent/cell end, no pipe blocking
     log = f"/tmp/{name.replace('/', '_')}.log"
     lf = open(log, "ab", buffering=0)
-    print(f"[{name}] (detached, log={log}) {cmd}", flush=True)
+    print(f"[{name}] (detached, log={log}) {_redact(cmd)}", flush=True)
     return subprocess.Popen(cmd, shell=True, start_new_session=True, stdout=lf, stderr=subprocess.STDOUT)
 
 def grep_url(name, pattern=r"https://[a-z0-9-]+\.trycloudflare\.com"):
@@ -73,7 +73,7 @@ def wait_http(url, tries=12, delay=5, name=""):
 
 def run(cmd):
     # Output is shown live on the terminal so failures are easy to spot.
-    print(f"$ {cmd}", flush=True)
+    print(f"$ {_redact(cmd)}", flush=True)
     r = subprocess.run(cmd, shell=True)
     return r.returncode == 0
 
@@ -86,6 +86,11 @@ def set_password(user, pw):
         return True
     except Exception:
         return False
+
+def _redact(s):
+    # Mask secrets (Cloudflare JWTs / cfut_ tokens) so they never land in logs/console.
+    return re.sub(r'(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|cfut_[A-Za-z0-9_-]+)',
+                  lambda m: m.group(0)[:6] + "\u2026[REDACTED]", str(s))
 
 
 def ensure_tool(name, install_cmd):
@@ -222,8 +227,12 @@ def main():
     DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
-    # SSH password: SSH_PASSWORD -> SSH_PASS -> fallback to OpenChamber UI password
-    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD") or PASSWORD
+    # SSH password: only from explicit SSH secrets. Never fall back to the "changeme"
+    # placeholder - setting that as the public root SSH password would be a critical hole.
+    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD")
+    # If no explicit SSH password, reuse the UI password ONLY when it is a real one (not default).
+    if not SSH_PASSWORD and PASSWORD and PASSWORD != "changeme":
+        SSH_PASSWORD = PASSWORD
     # MODEL: if secret not present -> default, if passed -> use that (no :QUANT - llmster regex rejects colon; use HF repo id)
     MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
@@ -277,16 +286,7 @@ def main():
             else:
                 print(f"User {u} not found, skipping chpasswd", flush=True)
     else:
-        # fallback: use OpenChamber UI password for SSH too
-        if PASSWORD and PASSWORD != "changeme":
-            os.environ["SSH_PASSWORD"] = PASSWORD
-            ssh_user = os.getenv("USER") or "root"
-            for u in list({ssh_user, "root"}):
-                if run(f"id -u {u} >/dev/null 2>&1"):
-                    set_password(u, PASSWORD)
-                    print(f"SSH password set for {u} (from OPENCHAMBER_UI_PASSWORD)", flush=True)
-        else:
-            print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
+        print("No SSH password provided (and UI password is default) - NOT setting a known root password; SSH relies on existing host password/keys", flush=True)
 
     # Install & start sshd so the cloudflared ssh ingress (ssh://localhost:22) has a server.
     # The password above is useless without an actual SSH daemon running.
@@ -295,10 +295,11 @@ def main():
             run("apt-get update -qq && apt-get install -y openssh-server || true")
         run("mkdir -p /run/sshd")
         run("ssh-keygen -A")  # generate host keys if missing
-        # Allow root password login (we set a root password above specifically for SSH access)
+        # Only enable root password auth if we actually set a real (non-default) password.
         dropin = "/etc/ssh/sshd_config.d/99-cloudflare-ssh.conf"
+        pw_auth = "yes" if (SSH_PASSWORD and SSH_PASSWORD.strip()) else "no"
         with open(dropin, "w") as f:
-            f.write("PermitRootLogin yes\nPasswordAuthentication yes\n")
+            f.write(f"PermitRootLogin yes\nPasswordAuthentication {pw_auth}\n")
         run("/usr/sbin/sshd -t && echo sshd_config OK")  # validate before (re)start
         run("pkill -x sshd 2>/dev/null || true")
         time.sleep(1)
@@ -738,7 +739,7 @@ ingress:
                 # dedupe on the full token (truncated strings never matched -> double API call)
                 if cand and cand not in tried:
                     tried.append(cand)
-                    print(f"Trying CF API with token {cand[:12]}...", flush=True)
+                    print("Trying CF API with provided token...", flush=True)
                     jwt = cf_api_named_tunnel(cand, DOMAIN, TUNNEL)
                     if jwt:
                         break
@@ -847,7 +848,7 @@ ingress:
             # restart dead tunnels
             for i, p in enumerate(tunnels):
                 if p.poll() is not None:
-                    print(f"TUNNEL DIED: {p.args} code={p.returncode} -> restarting...", flush=True)
+                    print(f"TUNNEL DIED: {_redact(str(p.args))} code={p.returncode} -> restarting...", flush=True)
                     tunnels[i] = run_bg(p.args, f"cloudflared-restart-{i}")
             if tick % 6 == 0:
                 print(f"[{time.strftime('%H:%M:%S')}] keepalive #{tick}: {' '.join(status)} | listening: {len(listeners)} ports", flush=True)
