@@ -28,6 +28,21 @@ import re
 import json
 import shutil
 
+# Load a local .env (gitignored) if present - convenient for non-Kaggle/dev runs.
+# Secrets here are NEVER committed; for Kaggle use Kaggle Secrets instead.
+try:
+    _envfile = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    with open(_envfile) as _ef:
+        for _line in _ef:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            _k, _v = _k.strip(), _v.strip().strip('"').strip("'")
+            os.environ.setdefault(_k, _v)
+except FileNotFoundError:
+    pass
+
 def get_secret(name, default=None):
     # 1. os.environ (strip empty)
     for k in [name, name.upper(), name.lower()]:
