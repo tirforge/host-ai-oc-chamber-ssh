@@ -13,21 +13,22 @@ MODEL=${MODEL:-lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF}
 if [ -n "$3" ]; then MODEL="$3"; fi
 
 # SSH password: SSH_PASSWORD -> SSH_PASS -> fallback to OpenChamber UI password
+# Use a here-string so the password is passed via stdin, never as a visible argv (`ps`).
 if [ -n "${SSH_PASSWORD:-}" ]; then
   echo "Configuring SSH password from SSH_PASSWORD env..."
   _ssh_user="${USER:-root}"
   for _u in "$_ssh_user" root; do
     if id -u "$_u" >/dev/null 2>&1; then
-      echo "$_u:$SSH_PASSWORD" | chpasswd 2>&1 || true
+      chpasswd <<<"$_u:$SSH_PASSWORD" 2>&1 || true
       echo "SSH password set for $_u"
     fi
   done
 elif [ -n "${SSH_PASS:-}" ]; then
   echo "Configuring SSH password from SSH_PASS..."
-  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then echo "$_u:$SSH_PASS" | chpasswd 2>&1 || true; echo "SSH password set for $_u"; fi; done
+  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then chpasswd <<<"$_u:$SSH_PASS" 2>&1 || true; echo "SSH password set for $_u"; fi; done
 elif [ -n "${OPENCHAMBER_UI_PASSWORD:-}" ] && [ "${OPENCHAMBER_UI_PASSWORD}" != "changeme" ]; then
   echo "Using OPENCHAMBER_UI_PASSWORD for SSH..."
-  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then echo "$_u:$OPENCHAMBER_UI_PASSWORD" | chpasswd 2>&1 || true; echo "SSH password set for $_u (from OPENCHAMBER_UI_PASSWORD)"; fi; done
+  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then chpasswd <<<"$_u:$OPENCHAMBER_UI_PASSWORD" 2>&1 || true; echo "SSH password set for $_u (from OPENCHAMBER_UI_PASSWORD)"; fi; done
 fi
 # Map old alias to valid HF repo
 if [ "$MODEL" = "qwen/qwen3-coder-30b-a3b" ] || [ "$MODEL" = "qwen3-coder-30b-a3b" ]; then
@@ -54,14 +55,29 @@ if ! lms get "$base" -y && ! lms get "$base"; then
   pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true
   (hf download "$base" $HF_REPO_TYPE --include "*Q4_K_M*" --local-dir "$_dest" </dev/null || huggingface-cli download "$base" $HF_REPO_TYPE --include "*Q4_K_M*" --local-dir "$_dest" </dev/null) || echo "HF direct failed"
 fi
-echo "Starting LM Studio..."
-lms server start --port 1234 --cors &
-# wait for LM Studio before starting dependents
-for i in 1 2 3 4 5 6; do curl -s -m 3 http://localhost:1234/v1/models | grep -q '"data"' && break; sleep 5; echo "waiting LM Studio :1234 ($i)..."; done
+# Engine selection (mirror startup.py): llama-runner if ENGINE=llama-runner or LMS_LOAD_FAILED=1
+ENGINE_MODE="${ENGINE:-lms}"
+if [ "${LMS_LOAD_FAILED:-}" = "1" ]; then ENGINE_MODE="llama-runner"; fi
+if [ "$ENGINE_MODE" = "llama-runner" ] && [ -d /tmp/llama-runner ]; then
+  echo "Starting llama-runner (:1234)..."
+  ( cd /tmp/llama-runner && python main.py --headless ) &
+else
+  echo "Starting LM Studio..."
+  lms server start --port 1234 --cors &
+fi
+# wait for :1234 (either engine) before starting dependents
+for i in 1 2 3 4 5 6; do curl -s -m 3 http://localhost:1234/v1/models | grep -q '"data"' && break; sleep 5; echo "waiting :1234 ($i)..."; done
 echo "Starting Opencode Web (full tool support, port 2456)..."
+# password-safe UP check: credentials via curl --config (no password in argv / no quote-break)
+oc_up() {
+  local pw="${OPENCHAMBER_UI_PASSWORD:-changeme}" cf
+  cf=$(mktemp); printf 'user = opencode:%s\n' "$pw" > "$cf"
+  curl -s -m 3 -o /dev/null -w "%{http_code}" --config "$cf" http://localhost:2456
+  rm -f "$cf"
+}
 # reuse if already listening, else start; opencode web requires user=opencode / pass=OPENCODE_SERVER_PASSWORD
 # reuse only if current password accepted (stale instance with old password -> restart)
-if curl -s -m 3 -o /dev/null -w "%{http_code}" -u "opencode:${OPENCHAMBER_UI_PASSWORD:-changeme}" http://localhost:2456 | grep -q "200"; then echo "Opencode :2456 already UP (password OK)"; else
+if [ "$(oc_up)" = "200" ]; then echo "Opencode :2456 already UP (password OK)"; else
   [ -n "$(ss -tlnp 2>/dev/null | grep ':2456 ')" ] && { echo "killing stale :2456"; fuser -k 2456/tcp 2>/dev/null || true; sleep 2; }
   OPENCODE_SERVER_PASSWORD="${OPENCHAMBER_UI_PASSWORD:-changeme}" opencode web --port 2456 --hostname 0.0.0.0 &
 fi
@@ -70,7 +86,12 @@ echo "Starting OpenChamber..."
 if curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:3000 | grep -q "200"; then echo "OpenChamber :3000 already UP"; else openchamber --ui-password "${OPENCHAMBER_UI_PASSWORD:-changeme}" & fi
 for i in 1 2 3 4 5 6; do code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:3000); echo "chamber check $i: $code"; [ "$code" = "200" ] && break; sleep 3; done
 echo "Starting Cloudflare tunnel $TUNNEL for ai.$DOMAIN oc.$DOMAIN chamber.$DOMAIN ssh.$DOMAIN (after origins UP)"
-cloudflared tunnel run $TUNNEL
+# Token (JWT) mode: cloudflared run --token (no credentials file needed); else cert mode.
+if [ -n "${TUNNEL_TOKEN:-}" ]; then
+  cloudflared tunnel run --token "$TUNNEL_TOKEN"
+else
+  cloudflared tunnel run $TUNNEL
+fi
 
 # Receiver side (laptop) SSH:
 # ssh -o ProxyCommand="cloudflared access ssh --hostname ssh.$DOMAIN" user@ssh.$DOMAIN

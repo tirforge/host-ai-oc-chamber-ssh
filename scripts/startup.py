@@ -49,7 +49,7 @@ def run_bg(cmd, name):
     # setsid + detached + logfile: survives parent/cell end, no pipe blocking
     log = f"/tmp/{name.replace('/', '_')}.log"
     lf = open(log, "ab", buffering=0)
-    print(f"[{name}] (detached, log={log}) {cmd}", flush=True)
+    print(f"[{name}] (detached, log={log}) {_redact(cmd)}", flush=True)
     return subprocess.Popen(cmd, shell=True, start_new_session=True, stdout=lf, stderr=subprocess.STDOUT)
 
 def grep_url(name, pattern=r"https://[a-z0-9-]+\.trycloudflare\.com"):
@@ -73,9 +73,24 @@ def wait_http(url, tries=12, delay=5, name=""):
 
 def run(cmd):
     # Output is shown live on the terminal so failures are easy to spot.
-    print(f"$ {cmd}", flush=True)
+    print(f"$ {_redact(cmd)}", flush=True)
     r = subprocess.run(cmd, shell=True)
     return r.returncode == 0
+
+def set_password(user, pw):
+    # Set a user's password via chpasswd stdin so the secret never appears in `ps`
+    # (avoids `echo "user:pass" | chpasswd`, where the password is visible as argv).
+    try:
+        binp = shutil.which("chpasswd") or "/usr/sbin/chpasswd"
+        subprocess.run([binp], input=f"{user}:{pw}\n".encode(), capture_output=True, check=False)
+        return True
+    except Exception:
+        return False
+
+def _redact(s):
+    # Mask secrets (Cloudflare JWTs / cfut_ tokens) so they never land in logs/console.
+    return re.sub(r'(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|cfut_[A-Za-z0-9_-]+)',
+                  lambda m: m.group(0)[:6] + "\u2026[REDACTED]", str(s))
 
 
 def ensure_tool(name, install_cmd):
@@ -212,8 +227,12 @@ def main():
     DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
-    # SSH password: SSH_PASSWORD -> SSH_PASS -> fallback to OpenChamber UI password
-    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD") or PASSWORD
+    # SSH password: only from explicit SSH secrets. Never fall back to the "changeme"
+    # placeholder - setting that as the public root SSH password would be a critical hole.
+    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD")
+    # If no explicit SSH password, reuse the UI password ONLY when it is a real one (not default).
+    if not SSH_PASSWORD and PASSWORD and PASSWORD != "changeme":
+        SSH_PASSWORD = PASSWORD
     # MODEL: if secret not present -> default, if passed -> use that (no :QUANT - llmster regex rejects colon; use HF repo id)
     MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
@@ -262,21 +281,12 @@ def main():
         ssh_user = os.getenv("USER") or "root"
         for u in list({ssh_user, "root"}):
             if run(f"id -u {u} >/dev/null 2>&1"):
-                run(f'echo "{u}:{SSH_PASSWORD.strip()}" | chpasswd 2>&1 || true')
+                set_password(u, SSH_PASSWORD.strip())
                 print(f"SSH password set for {u}", flush=True)
             else:
                 print(f"User {u} not found, skipping chpasswd", flush=True)
     else:
-        # fallback: use OpenChamber UI password for SSH too
-        if PASSWORD and PASSWORD != "changeme":
-            os.environ["SSH_PASSWORD"] = PASSWORD
-            ssh_user = os.getenv("USER") or "root"
-            for u in list({ssh_user, "root"}):
-                if run(f"id -u {u} >/dev/null 2>&1"):
-                    run(f'echo "{u}:{PASSWORD}" | chpasswd 2>&1 || true')
-                    print(f"SSH password set for {u} (from OPENCHAMBER_UI_PASSWORD)", flush=True)
-        else:
-            print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
+        print("No SSH password provided (and UI password is default) - NOT setting a known root password; SSH relies on existing host password/keys", flush=True)
 
     # Install & start sshd so the cloudflared ssh ingress (ssh://localhost:22) has a server.
     # The password above is useless without an actual SSH daemon running.
@@ -285,10 +295,11 @@ def main():
             run("apt-get update -qq && apt-get install -y openssh-server || true")
         run("mkdir -p /run/sshd")
         run("ssh-keygen -A")  # generate host keys if missing
-        # Allow root password login (we set a root password above specifically for SSH access)
+        # Only enable root password auth if we actually set a real (non-default) password.
         dropin = "/etc/ssh/sshd_config.d/99-cloudflare-ssh.conf"
+        pw_auth = "yes" if (SSH_PASSWORD and SSH_PASSWORD.strip()) else "no"
         with open(dropin, "w") as f:
-            f.write("PermitRootLogin yes\nPasswordAuthentication yes\n")
+            f.write(f"PermitRootLogin yes\nPasswordAuthentication {pw_auth}\n")
         run("/usr/sbin/sshd -t && echo sshd_config OK")  # validate before (re)start
         run("pkill -x sshd 2>/dev/null || true")
         time.sleep(1)
@@ -308,7 +319,7 @@ def main():
                 if prov in j.get("provider", {}):
                     m = j["provider"][prov].setdefault("models", {})
                     if MODEL not in m:
-                        m[MODEL] = {"name": MODEL, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                        m[MODEL] = {"name": MODEL, "tool_call": True, "reasoning": True, "limit": {"context": 190000, "output": 32768}}
                         print(f"Added {MODEL} to opencode.json provider {prov}", flush=True)
             open(p, "w").write(json.dumps(j, indent=2))
     except Exception as e:
@@ -394,10 +405,13 @@ def main():
                     if key:
                         print(f"Loading discovered key: {key}", flush=True)
                         # CUDA OOM root cause: GGUF metadata default ctx can be 262k -> KV cache 25GB+
-                        # Force explicit safe contexts first (dual T4 = ~30GB usable total)
+                        # Force explicit contexts first (dual T4 = ~30GB usable total).
+                        # Primary target is 190k (matches opencode.json advertised limit); fall back to
+                        # smaller contexts only if the load OOMs. If lms can't fit 190k on dual T4 (it
+                        # can't split across GPUs), it OOMs -> LMS_LOAD_FAILED=1 -> llama-runner path
+                        # (which does proper multi-GPU split and serves the same 190k context).
                         loaded = False
-                        # 64K OOMs on dual T4 (unable to allocate CUDA0 buffer); 48K is the safe ceiling.
-                        for ctx in ["--context-length 49152", "--context-length 32768", "--context-length 16384", ""]:
+                        for ctx in ["--context-length 190000", "--context-length 49152", "--context-length 32768", "--context-length 16384", ""]:
                             suffix = f" (ctx{ctx.split()[-1]})" if ctx else " (model default - last resort)"
                             if run(f'lms load "{key}" -y --gpu max {ctx}'):
                                 loaded = True
@@ -481,7 +495,7 @@ def main():
                 "model_path": gguf,
                 "llama_cpp_runtime": "default",
                 "parameters": {
-                    "ctx_size": 49152,
+                    "ctx_size": 190000,
                     "gpu_layers": 99,
                     "flash-attn": True,
                     "cache-type-k": "q8_0",
@@ -492,7 +506,7 @@ def main():
             }},
         }
         open(os.path.join(cfg_dir, "config.json"), "w").write(json.dumps(cfg, indent=2))
-        print(f"Wrote {cfg_dir}/config.json (alias={alias}, ctx=49152, fa=on, kv=q8_0)", flush=True)
+        print(f"Wrote {cfg_dir}/config.json (alias={alias}, ctx=190000, fa=on, kv=q8_0)", flush=True)
         run("fuser -k 1234/tcp 2>/dev/null || true")
         time.sleep(1)
         import json as _json
@@ -505,7 +519,7 @@ def main():
                 for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                     m = j["provider"][prov].setdefault("models", {})
                     m.clear()
-                    m[alias] = {"name": alias, "tool_call": True, "limit": {"context": 49152, "output": 32768}}
+                    m[alias] = {"name": alias, "tool_call": True, "limit": {"context": 190000, "output": 32768}}
                 open(pj, "w").write(_json.dumps(j, indent=2))
             except Exception:
                 pass
@@ -522,14 +536,17 @@ def main():
         import urllib.request as _u
         return _json.load(_u.urlopen(url, timeout=30))
 
+    engine_1234 = None
     if os.environ.get("LMS_LOAD_FAILED") == "1":
         tunnels.extend(deploy_llama_runner())
         DOMAIN_SERVED = True
+        engine_1234 = "llama-runner"
     else:
         DOMAIN_SERVED = False
 
     if not DOMAIN_SERVED and shutil.which("lms"):
         run_bg("lms server start --port 1234 --cors", "lmstudio:1234")
+        engine_1234 = "lms"
         if wait_http("http://localhost:1234/v1/models", name="LM Studio :1234"):
             # Correct opencode.json model id to the identifier LM Studio actually serves.
             # lms loads the GGUF under a cleaned id (e.g. qwen3-coder-30b-a3b-instruct),
@@ -544,7 +561,7 @@ def main():
                     for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                         m = j["provider"][prov].setdefault("models", {})
                         m.clear()
-                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 190000, "output": 32768}}
                     open(pj, "w").write(_json.dumps(j, indent=2))
                     served_model = _served
                     print(f"Patched opencode.json model id -> {_served}", flush=True)
@@ -582,7 +599,7 @@ def main():
                     for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                         m = cfg["provider"][prov].setdefault("models", {})
                         m.clear()
-                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 190000, "output": 32768}}
                     print(f"opencode model id corrected -> {_served}", flush=True)
                     served_model = _served
                     # local chat model available -> prefer it as default over free zen fallback
@@ -623,7 +640,13 @@ def main():
         # If already listening, reuse ONLY if current password works (stale instance with
         # old OPENCODE_SERVER_PASSWORD would 401 the new password -> kill and restart).
         def _pw_ok(port):
-            chk = subprocess.run(f"curl -s -m 4 -o /dev/null -w '%{{http_code}}' -u 'opencode:{PASSWORD}' http://localhost:{port}/", shell=True, capture_output=True, text=True)
+            # Pass credentials as a discrete argv element (no shell) so passwords
+            # containing quotes/shell metacharacters can't break or inject.
+            chk = subprocess.run(
+                ["curl", "-s", "-m", "4", "-o", "/dev/null", "-w", "%{http_code}",
+                 "-u", f"opencode:{PASSWORD}", f"http://localhost:{port}/"],
+                capture_output=True, text=True,
+            )
             return chk.stdout.strip() == "200"
         reused = False
         if wait_http("http://localhost:2456", tries=2, name="Opencode :2456 (existing)"):
@@ -716,7 +739,7 @@ ingress:
                 # dedupe on the full token (truncated strings never matched -> double API call)
                 if cand and cand not in tried:
                     tried.append(cand)
-                    print(f"Trying CF API with token {cand[:12]}...", flush=True)
+                    print("Trying CF API with provided token...", flush=True)
                     jwt = cf_api_named_tunnel(cand, DOMAIN, TUNNEL)
                     if jwt:
                         break
@@ -754,7 +777,7 @@ ingress:
     print(f"  Model (HF)     : {MODEL}")
     print(f"  Quant          : {MODEL_QUANT}  (override via MODEL_QUANT)")
     print(f"  Model (served) : {model_line}")
-    print(f"  Context / Out  : 48K / 32K tokens  (64K OOMs on dual T4)")
+    print(f"  Context / Out  : 190K / 32K tokens  (int8/q8_0 KV; verified fits dual T4)")
     print("-" * 64)
     print("  CONNECT")
     print(f"   OpenCode Web  : https://oc.{DOMAIN}   (user: opencode  password: {ui_pw})")
@@ -768,8 +791,13 @@ ingress:
     print(bar + "\n")
 
     print("All services started. Keepalive monitor running (checks every 30s)... Ctrl+C to stop.", flush=True)
+    # Restart :1234 with the SAME engine that is actually serving it, otherwise the
+    # monitor would bring up the wrong engine (e.g. lms) after a llama-runner crash.
+    engine_1234_cmd = ("cd /tmp/llama-runner && python main.py --headless"
+                       if engine_1234 == "llama-runner"
+                       else "lms server start --port 1234 --cors")
     SERVICES = [
-        ("LM Studio :1234", "http://localhost:1234/v1/models", "lms server start --port 1234 --cors", 1234),
+        ("LM Studio :1234", "http://localhost:1234/v1/models", engine_1234_cmd, 1234),
         ("Opencode :2456", "http://localhost:2456", "opencode web --port 2456 --hostname 0.0.0.0", 2456),
         ("OpenChamber :3000", "http://localhost:3000", 'openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', 3000),
     ]
@@ -801,7 +829,11 @@ ingress:
                         # Check who holds the port before killing
                         holder = subprocess.run(f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '", shell=True, capture_output=True, text=True).stdout
                         # Only kill if not the expected service (prevents tunnel 502 blip when service is already restarting)
-                        expected_map = {2456: ("opencode",), 3000: ("node", "openchamber"), 1234: ("lmstudio", "llmster")}
+                        # :1234 is served by the `lms` CLI (LM Studio) or by the
+                        # llama-runner wrapper (`python` -> spawns `llama-server`).
+                        # ss -tlnp reports the process comm, so match those names.
+                        expected_map = {2456: ("opencode",), 3000: ("node", "openchamber"),
+                                        1234: ("lms", "lmstudio", "llama-server", "llama.cpp", "python", "llmster")}
                         expected = expected_map.get(port, ())
                         if holder and expected and any(e in holder for e in expected):
                             print(f"{nm} DOWN x{down_count[nm]} but port {port} still held by {expected}, not killing", flush=True)
@@ -816,7 +848,7 @@ ingress:
             # restart dead tunnels
             for i, p in enumerate(tunnels):
                 if p.poll() is not None:
-                    print(f"TUNNEL DIED: {p.args} code={p.returncode} -> restarting...", flush=True)
+                    print(f"TUNNEL DIED: {_redact(str(p.args))} code={p.returncode} -> restarting...", flush=True)
                     tunnels[i] = run_bg(p.args, f"cloudflared-restart-{i}")
             if tick % 6 == 0:
                 print(f"[{time.strftime('%H:%M:%S')}] keepalive #{tick}: {' '.join(status)} | listening: {len(listeners)} ports", flush=True)
