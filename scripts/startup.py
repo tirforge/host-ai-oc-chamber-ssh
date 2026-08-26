@@ -394,10 +394,13 @@ def main():
                     if key:
                         print(f"Loading discovered key: {key}", flush=True)
                         # CUDA OOM root cause: GGUF metadata default ctx can be 262k -> KV cache 25GB+
-                        # Force explicit safe contexts first (dual T4 = ~30GB usable total)
+                        # Force explicit contexts first (dual T4 = ~30GB usable total).
+                        # Primary target is 190k (matches opencode.json advertised limit); fall back to
+                        # smaller contexts only if the load OOMs. If lms can't fit 190k on dual T4 (it
+                        # can't split across GPUs), it OOMs -> LMS_LOAD_FAILED=1 -> llama-runner path
+                        # (which does proper multi-GPU split and serves the same 190k context).
                         loaded = False
-                        # 64K OOMs on dual T4 (unable to allocate CUDA0 buffer); 48K is the safe ceiling.
-                        for ctx in ["--context-length 49152", "--context-length 32768", "--context-length 16384", ""]:
+                        for ctx in ["--context-length 190000", "--context-length 49152", "--context-length 32768", "--context-length 16384", ""]:
                             suffix = f" (ctx{ctx.split()[-1]})" if ctx else " (model default - last resort)"
                             if run(f'lms load "{key}" -y --gpu max {ctx}'):
                                 loaded = True
