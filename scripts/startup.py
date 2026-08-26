@@ -200,10 +200,18 @@ def sync_pull():
         return
     local = SYNC_REPO_LOCAL
     try:
+        expected_url = f"https://github.com/{repo}.git"
+        if os.path.isdir(os.path.join(local, ".git")):
+            # If the local clone points at a different repo (e.g. SYNC_REPO changed),
+            # re-clone so we don't pull/push the wrong repository.
+            cur = subprocess.run(["git", "-C", local, "remote", "get-url", "origin"],
+                                 capture_output=True, text=True).stdout.strip()
+            if cur and repo not in cur:
+                print(f"[sync] local clone points at {cur}; re-cloning for {repo}", flush=True)
+                shutil.rmtree(local)
         if not os.path.isdir(os.path.join(local, ".git")):
-            url = f"https://github.com/{repo}.git"
             print(f"[sync] cloning {repo} ...", flush=True)
-            subprocess.run(["git", "clone", "--depth", "1", url, local], check=True)
+            subprocess.run(["git", "clone", "--depth", "1", expected_url, local], check=True)
         else:
             subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"], check=True)
         copied = 0
