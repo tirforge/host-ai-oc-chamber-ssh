@@ -326,7 +326,7 @@ def main():
     ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"; lms daemon up || true")
     ensure_tool("cloudflared", "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared || true")
     # opencode: npm -g is main, script as fallback (as you requested)
-    ensure_tool("opencode", "npm install -g opencode-ai || npm i -g opencode || bun install -g opencode-ai || curl -fsSL https://opencode.ai/install | bash || true; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
+    ensure_tool("opencode", "npm install -g opencode-ai || bun install -g opencode-ai || curl -fsSL https://opencode.ai/install | bash || true; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
     # openchamber needs Node 22+ - ensure Node 22 is active before install (use nodesource for Kaggle)
     if not shutil.which("openchamber"):
         has_node22 = shutil.which("node") and run("node --version | grep -q 'v22\\|v23\\|v24'")
@@ -492,7 +492,7 @@ def main():
             }},
         }
         open(os.path.join(cfg_dir, "config.json"), "w").write(json.dumps(cfg, indent=2))
-        print(f"Wrote {cfg_dir}/config.json (alias={alias}, ctx=16384, fa=on, kv=q8_0)", flush=True)
+        print(f"Wrote {cfg_dir}/config.json (alias={alias}, ctx=49152, fa=on, kv=q8_0)", flush=True)
         run("fuser -k 1234/tcp 2>/dev/null || true")
         time.sleep(1)
         import json as _json
@@ -620,8 +620,21 @@ def main():
 
     if shutil.which("opencode"):
         os.environ["OPENCODE_SERVER_PASSWORD"] = PASSWORD  # secure opencode web (fixes unsecured warning)
-        # If already listening, reuse; else start
-        if not wait_http("http://localhost:2456", tries=2, name="Opencode :2456 (existing)"):
+        # If already listening, reuse ONLY if current password works (stale instance with
+        # old OPENCODE_SERVER_PASSWORD would 401 the new password -> kill and restart).
+        def _pw_ok(port):
+            chk = subprocess.run(f"curl -s -m 4 -o /dev/null -w '%{{http_code}}' -u 'opencode:{PASSWORD}' http://localhost:{port}/", shell=True, capture_output=True, text=True)
+            return chk.stdout.strip() == "200"
+        reused = False
+        if wait_http("http://localhost:2456", tries=2, name="Opencode :2456 (existing)"):
+            if _pw_ok(2456):
+                print("Existing Opencode :2456 accepts current password - reusing", flush=True)
+                reused = True
+            else:
+                print("Existing Opencode :2456 has stale password -> killing for restart with current PASSWORD", flush=True)
+                run("fuser -k 2456/tcp 2>/dev/null || true")
+                time.sleep(2)
+        if not reused:
             run_bg(f'opencode web --port 2456 --hostname 0.0.0.0', "opencode:2456")
             wait_http("http://localhost:2456", tries=6, name="Opencode :2456")
     else:
@@ -700,8 +713,9 @@ ingress:
             jwt = None
             tried = []
             for cand in [CF_TOKEN, TUNNEL_TOKEN]:
+                # dedupe on the full token (truncated strings never matched -> double API call)
                 if cand and cand not in tried:
-                    tried.append(cand[:12] + "...")
+                    tried.append(cand)
                     print(f"Trying CF API with token {cand[:12]}...", flush=True)
                     jwt = cf_api_named_tunnel(cand, DOMAIN, TUNNEL)
                     if jwt:
@@ -787,9 +801,9 @@ ingress:
                         # Check who holds the port before killing
                         holder = subprocess.run(f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '", shell=True, capture_output=True, text=True).stdout
                         # Only kill if not the expected service (prevents tunnel 502 blip when service is already restarting)
-                        expected_map = {2456: "opencode", 3000: "node", 1234: "lmstudio"}
-                        expected = expected_map.get(port, "")
-                        if holder and expected and expected in holder:
+                        expected_map = {2456: ("opencode",), 3000: ("node", "openchamber"), 1234: ("lmstudio", "llmster")}
+                        expected = expected_map.get(port, ())
+                        if holder and expected and any(e in holder for e in expected):
                             print(f"{nm} DOWN x{down_count[nm]} but port {port} still held by {expected}, not killing", flush=True)
                         else:
                             print(f"{nm} DOWN x{down_count[nm]} -> restarting... (holder: {holder.strip()[:80] or 'none'})", flush=True)

@@ -60,7 +60,11 @@ lms server start --port 1234 --cors &
 for i in 1 2 3 4 5 6; do curl -s -m 3 http://localhost:1234/v1/models | grep -q '"data"' && break; sleep 5; echo "waiting LM Studio :1234 ($i)..."; done
 echo "Starting Opencode Web (full tool support, port 2456)..."
 # reuse if already listening, else start; opencode web requires user=opencode / pass=OPENCODE_SERVER_PASSWORD
-if curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:2456 | grep -qE "200|401"; then echo "Opencode :2456 already UP"; else OPENCODE_SERVER_PASSWORD="${OPENCHAMBER_UI_PASSWORD:-changeme}" opencode web --port 2456 --hostname 0.0.0.0 & fi
+# reuse only if current password accepted (stale instance with old password -> restart)
+if curl -s -m 3 -o /dev/null -w "%{http_code}" -u "opencode:${OPENCHAMBER_UI_PASSWORD:-changeme}" http://localhost:2456 | grep -q "200"; then echo "Opencode :2456 already UP (password OK)"; else
+  [ -n "$(ss -tlnp 2>/dev/null | grep ':2456 ')" ] && { echo "killing stale :2456"; fuser -k 2456/tcp 2>/dev/null || true; sleep 2; }
+  OPENCODE_SERVER_PASSWORD="${OPENCHAMBER_UI_PASSWORD:-changeme}" opencode web --port 2456 --hostname 0.0.0.0 &
+fi
 for i in 1 2 3 4 5 6; do code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:2456); echo "oc check $i: $code"; echo "$code" | grep -qE "200|401" && break; sleep 3; done
 echo "Starting OpenChamber..."
 if curl -s -m 3 -o /dev/null -w "%{http_code}" http://localhost:3000 | grep -q "200"; then echo "OpenChamber :3000 already UP"; else openchamber --ui-password "${OPENCHAMBER_UI_PASSWORD:-changeme}" & fi
