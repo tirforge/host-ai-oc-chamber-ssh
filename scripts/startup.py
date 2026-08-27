@@ -13,6 +13,10 @@ Env secrets (set in Kaggle Secrets -> Add-ons -> Secrets):
   MODEL  (default: lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF)
   TUNNEL_NAME (default: t4host)
   LM_API_TOKEN (optional, for ai subdomain auth)
+  SYNC_REPO (optional, e.g. tirforge/my-opencode-config) - if set, opencode-synced
+    pulls your OpenCode global config at session start and pushes it at stop
+    (persists config across Kaggle's ephemeral disks). Needs a GitHub token
+    in GH_TOKEN/ACCESS_TOKEN with repo scope; the repo must already exist.
 
 Run: python scripts/startup.py
 """
@@ -23,6 +27,22 @@ import time
 import re
 import json
 import shutil
+import threading
+
+# Load a local .env (gitignored) if present - convenient for non-Kaggle/dev runs.
+# Secrets here are NEVER committed; for Kaggle use Kaggle Secrets instead.
+try:
+    _envfile = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    with open(_envfile) as _ef:
+        for _line in _ef:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            _k, _v = _k.strip(), _v.strip().strip('"').strip("'")
+            os.environ.setdefault(_k, _v)
+except FileNotFoundError:
+    pass
 
 def get_secret(name, default=None):
     # 1. os.environ (strip empty)
@@ -49,7 +69,7 @@ def run_bg(cmd, name):
     # setsid + detached + logfile: survives parent/cell end, no pipe blocking
     log = f"/tmp/{name.replace('/', '_')}.log"
     lf = open(log, "ab", buffering=0)
-    print(f"[{name}] (detached, log={log}) {cmd}", flush=True)
+    print(f"[{name}] (detached, log={log}) {_redact(cmd)}", flush=True)
     return subprocess.Popen(cmd, shell=True, start_new_session=True, stdout=lf, stderr=subprocess.STDOUT)
 
 def grep_url(name, pattern=r"https://[a-z0-9-]+\.trycloudflare\.com"):
@@ -73,9 +93,24 @@ def wait_http(url, tries=12, delay=5, name=""):
 
 def run(cmd):
     # Output is shown live on the terminal so failures are easy to spot.
-    print(f"$ {cmd}", flush=True)
+    print(f"$ {_redact(cmd)}", flush=True)
     r = subprocess.run(cmd, shell=True)
     return r.returncode == 0
+
+def set_password(user, pw):
+    # Set a user's password via chpasswd stdin so the secret never appears in `ps`
+    # (avoids `echo "user:pass" | chpasswd`, where the password is visible as argv).
+    try:
+        binp = shutil.which("chpasswd") or "/usr/sbin/chpasswd"
+        subprocess.run([binp], input=f"{user}:{pw}\n".encode(), capture_output=True, check=False)
+        return True
+    except Exception:
+        return False
+
+def _redact(s):
+    # Mask secrets (Cloudflare JWTs / cfut_ tokens) so they never land in logs/console.
+    return re.sub(r'(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|cfut_[A-Za-z0-9_-]+)',
+                  lambda m: m.group(0)[:6] + "\u2026[REDACTED]", str(s))
 
 
 def ensure_tool(name, install_cmd):
@@ -88,6 +123,198 @@ def ensure_tool(name, install_cmd):
         if p not in os.environ.get("PATH", ""):
             os.environ["PATH"] = f"{p}:{os.environ.get('PATH','')}"
     return shutil.which(name) is not None
+
+# ---------------------------------------------------------------------------
+# opencode-synced integration (persist OpenCode global config across Kaggle
+# sessions via a private GitHub repo). Active only when SYNC_REPO is set
+# (e.g. "tirforge/my-opencode-config"). The plugin (opencode-synced) handles
+# live sync inside OpenCode; these helpers drive the lifecycle at session
+# boundaries (pull at start, push at stop) so config survives ephemeral disks.
+# ---------------------------------------------------------------------------
+SYNC_REPO_LOCAL = os.path.expanduser("~/.local/share/opencode/opencode-synced/repo")
+
+
+def setup_git_auth():
+    """Auth git/gh with a GitHub token so the sync repo can be cloned/pushed.
+    Token is passed via stdin / credential helper (never on the command line)."""
+    tok = (os.getenv("GH_TOKEN") or os.getenv("ACCESS_TOKEN")
+           or get_secret("GITHUB_TOKEN") or get_secret("GH_TOKEN"))
+    if not tok:
+        print("[sync] no GitHub token found (GH_TOKEN/ACCESS_TOKEN) - sync disabled", flush=True)
+        return False
+    try:
+        subprocess.run(["git", "config", "--global", "user.email", "sync@opencode.local"],
+                       capture_output=True)
+        subprocess.run(["git", "config", "--global", "user.name", "opencode-sync"],
+                       capture_output=True)
+        if shutil.which("gh"):
+            subprocess.run(["gh", "auth", "login", "--with-token"], input=tok,
+                           text=True, capture_output=True)
+            subprocess.run(["gh", "auth", "setup-git"], capture_output=True)
+        else:
+            cred = os.path.expanduser("~/.git-credentials")
+            with open(cred, "w") as f:
+                f.write(f"https://{tok}:@github.com\n")
+            os.chmod(cred, 0o600)
+            subprocess.run(["git", "config", "--global", "credential.helper", "store"],
+                           capture_output=True)
+        return True
+    except Exception as e:
+        print(f"[sync] git auth setup failed: {e}", flush=True)
+        return False
+
+
+def sync_repo_name():
+    """SYNC_REPO if set, else default to <gh-username>/my-opencode-config.
+    Returns None only if it cannot be resolved (no SYNC_REPO and no gh/git user)."""
+    r = os.getenv("SYNC_REPO")
+    if r:
+        return r
+    try:
+        if shutil.which("gh"):
+            out = subprocess.run(["gh", "api", "user", "--jq", ".login"],
+                                 capture_output=True, text=True)
+            login = out.stdout.strip()
+            if login:
+                return f"{login}/my-opencode-config"
+    except Exception:
+        pass
+    try:
+        nm = subprocess.run(["git", "config", "user.name"],
+                            capture_output=True, text=True).stdout.strip()
+        if nm:
+            return f"{nm}/my-opencode-config"
+    except Exception:
+        pass
+    return None
+
+
+def _sync_spec():
+    """(repo-relative-path, local-absolute-path) pairs mirrored by opencode-synced defaults."""
+    cfg = os.path.expanduser("~/.config/opencode")
+    home = os.path.expanduser("~")
+    return [
+        ("opencode.json", os.path.join(cfg, "opencode.json")),
+        ("opencode.jsonc", os.path.join(cfg, "opencode.jsonc")),
+        ("AGENTS.md", os.path.join(cfg, "AGENTS.md")),
+        ("agent", os.path.join(cfg, "agent")),
+        ("command", os.path.join(cfg, "command")),
+        ("mode", os.path.join(cfg, "mode")),
+        ("tool", os.path.join(cfg, "tool")),
+        ("themes", os.path.join(cfg, "themes")),
+        ("plugin", os.path.join(cfg, "plugin")),
+        ("skills", os.path.join(cfg, "skills")),
+        ("agents", os.path.join(home, ".agents")),
+        ("model.json", os.path.join(home, ".local/state/opencode/model.json")),
+    ]
+
+
+_sync_lock = threading.Lock()
+
+
+def sync_pull():
+    repo = sync_repo_name()
+    if not repo:
+        print("[sync] SYNC_REPO not set - skipping pull", flush=True)
+        return
+    local = SYNC_REPO_LOCAL
+    with _sync_lock:
+        try:
+            expected_url = f"https://github.com/{repo}.git"
+            if os.path.isdir(os.path.join(local, ".git")):
+                # If the local clone points at a different repo (e.g. SYNC_REPO changed),
+                # re-clone so we don't pull/push the wrong repository.
+                cur = subprocess.run(["git", "-C", local, "remote", "get-url", "origin"],
+                                     capture_output=True, text=True).stdout.strip()
+                if cur and repo not in cur:
+                    print(f"[sync] local clone points at {cur}; re-cloning for {repo}", flush=True)
+                    shutil.rmtree(local)
+            if not os.path.isdir(os.path.join(local, ".git")):
+                print(f"[sync] cloning {repo} ...", flush=True)
+                subprocess.run(["git", "clone", "--depth", "1", expected_url, local], check=True)
+            else:
+                subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"], check=True)
+            copied = 0
+            for rel, dst in _sync_spec():
+                src = os.path.join(local, rel)
+                if os.path.isfile(src):
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                    copied += 1
+                elif os.path.isdir(src):
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+                    copied += 1
+            print(f"[sync] pull applied {copied} item(s)", flush=True)
+        except Exception as e:
+            print(f"[sync] pull failed (continuing): {e}", flush=True)
+
+
+def sync_push():
+    repo = sync_repo_name()
+    if not repo:
+        return
+    local = SYNC_REPO_LOCAL
+    with _sync_lock:
+        try:
+            if not os.path.isdir(os.path.join(local, ".git")):
+                return  # nothing to push (pull never succeeded)
+            for rel, src in _sync_spec():
+                dst = os.path.join(local, rel)
+                if os.path.isfile(src):
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                elif os.path.isdir(src):
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+            subprocess.run(["git", "-C", local, "add", "-A"], capture_output=True, text=True)
+            st = subprocess.run(["git", "-C", local, "status", "--porcelain"],
+                                capture_output=True, text=True)
+            if not st.stdout.strip():
+                print("[sync] push: no changes", flush=True)
+                return
+            subprocess.run(["git", "-C", local, "commit", "-m",
+                            f"opencode-sync {time.strftime('%Y-%m-%dT%H:%M:%S')}"],
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", local, "pull", "--rebase", "--autostash"],
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", local, "push"], check=True)
+            print("[sync] push done", flush=True)
+        except Exception as e:
+            print(f"[sync] push failed (continuing): {e}", flush=True)
+
+
+def ensure_plugin_sync():
+    """Enable the opencode-synced plugin + write its config so in-IDE /sync-* works."""
+    try:
+        import json as _json
+        repo = sync_repo_name()
+        if not repo:
+            return
+        cfg_path = os.path.expanduser("~/.config/opencode/opencode.jsonc")
+        if not os.path.exists(cfg_path):
+            return
+        cfg = _json.load(open(cfg_path))
+        plugs = cfg.setdefault("plugin", [])
+        if isinstance(plugs, list) and "opencode-synced" not in plugs:
+            plugs.append("opencode-synced")
+            _json.dump(cfg, open(cfg_path, "w"), indent=2)
+        owner, _, name = repo.partition("/")
+        if not name:
+            name = "my-opencode-config"
+        sc = {
+            "repo": {"owner": owner, "name": name, "branch": "main"},
+            "includeSecrets": False,
+            "includeSessions": False,
+        }
+        with open(os.path.expanduser("~/.config/opencode/opencode-synced.jsonc"), "w") as f:
+            _json.dump(sc, f, indent=2)
+        print("[sync] opencode-synced plugin enabled + config written", flush=True)
+    except Exception as e:
+        print(f"[sync] plugin enable skipped: {e}", flush=True)
+
 
 def cf_api_named_tunnel(cf_token, domain, tunnel_name):
     """Create named tunnel + DNS + ingress entirely via Cloudflare API (no cert.pem/browser).
@@ -177,6 +404,19 @@ def cf_api_named_tunnel(cf_token, domain, tunnel_name):
 
 
 def main():
+    # opencode-synced: push config to GitHub when this process stops (graceful exit/SIGTERM).
+    import atexit as _atexit, signal as _sig
+    _atexit.register(sync_push)
+
+    def _on_term(_s, _f):
+        try:
+            sync_push()
+        finally:
+            os._exit(0)
+    try:
+        _sig.signal(_sig.SIGTERM, _on_term)
+    except Exception:
+        pass
     # Export PATH before any which checks (fixes lms/opencode not found after install)
     for p in [os.path.expanduser("~/.lmstudio/bin"), os.path.expanduser("~/.opencode/bin"), os.path.expanduser("~/.local/bin"), "/usr/local/bin"]:
         if p not in os.environ.get("PATH", ""):
@@ -212,8 +452,9 @@ def main():
     DOMAIN = get_secret("CF_DOMAIN") or get_secret("CLOUDFLARE_DOMAIN") or get_secret("DOMAIN")
     TUNNEL_TOKEN = get_secret("TUNNEL_TOKEN") or get_secret("CF_TUNNEL_TOKEN")
     PASSWORD = get_secret("OPENCHAMBER_UI_PASSWORD") or get_secret("UI_PASSWORD") or get_secret("PASSWORD") or "changeme"
-    # SSH password: SSH_PASSWORD -> SSH_PASS -> fallback to OpenChamber UI password
-    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD") or PASSWORD
+    # SSH password: only from explicit SSH secrets. The UI password is reused later
+    # ONLY when it is a real one (not the "changeme" default) - see below.
+    SSH_PASSWORD = get_secret("SSH_PASSWORD") or get_secret("SSH_PASS") or get_secret("SUDO_PASSWORD")
     # MODEL: if secret not present -> default, if passed -> use that (no :QUANT - llmster regex rejects colon; use HF repo id)
     MODEL_DEFAULT = "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF"
     MODEL = get_secret("MODEL") or get_secret("MODEL_NAME") or MODEL_DEFAULT
@@ -244,6 +485,36 @@ def main():
     served_model = None  # actual identifier LM Studio serves (populated after load)
     TUNNEL = get_secret("TUNNEL_NAME") or "t4host"
 
+    # --preflight: report resolved config/secrets/tool availability and exit
+    # without installing, downloading models, or starting any service.
+    if "--preflight" in sys.argv or "-n" in sys.argv:
+        print("\n=== PREFLIGHT CHECK (no changes made) ===", flush=True)
+        print(f"DOMAIN        : {DOMAIN or 'MISSING'}", flush=True)
+        print(f"CF_TOKEN      : {'set' if CF_TOKEN else 'MISSING'}", flush=True)
+        print(f"TUNNEL_TOKEN  : {'set' if TUNNEL_TOKEN else 'MISSING'}", flush=True)
+        print(f"PASSWORD      : {'set' if PASSWORD and PASSWORD != 'changeme' else 'changeme (default)'}", flush=True)
+        print(f"SSH_PASSWORD  : {'set' if SSH_PASSWORD and SSH_PASSWORD != 'changeme' else 'fallback to UI password'}", flush=True)
+        print(f"MODEL         : {MODEL}", flush=True)
+        print(f"MODEL_QUANT   : {MODEL_QUANT}", flush=True)
+        print(f"TUNNEL        : {TUNNEL}", flush=True)
+        print(f"SYNC_REPO     : {sync_repo_name()}", flush=True)
+        for t in ["lms", "cloudflared", "opencode", "openchamber", "sshd", "gh", "git"]:
+            print(f"  tool {t:12}: {'FOUND' if shutil.which(t) else 'missing'}", flush=True)
+        print("GPU:", flush=True)
+        try:
+            out = subprocess.run("nvidia-smi -L 2>/dev/null || true", shell=True,
+                                 capture_output=True, text=True).stdout.strip()
+            print(out or "  no nvidia-smi / no GPU visible", flush=True)
+        except Exception:
+            pass
+        missing = []
+        if not DOMAIN:
+            missing.append("CF_DOMAIN")
+        if not CF_TOKEN and not TUNNEL_TOKEN:
+            missing.append("CF_TOKEN/TUNNEL_TOKEN")
+        print("=== PREFLIGHT: " + ("READY" if not missing else f"NEEDS {', '.join(missing)}") + " ===", flush=True)
+        sys.exit(0)
+
     if not DOMAIN:
         print("ERROR: Need CF_DOMAIN (yourdomain.com) set as env/Kaggle secret", flush=True)
         print(f"Got DOMAIN={DOMAIN}", flush=True)
@@ -258,25 +529,25 @@ def main():
     os.environ["CF_API_TOKEN"] = CF_TOKEN if CF_TOKEN else ""
     if SSH_PASSWORD and SSH_PASSWORD.strip():
         os.environ["SSH_PASSWORD"] = SSH_PASSWORD.strip()
-        # configure SSH password - only chpasswd (passwd --stdin not on Debian), only for existing users
+        # configure SSH password via stdin (no password visible in `ps`)
         ssh_user = os.getenv("USER") or "root"
         for u in list({ssh_user, "root"}):
             if run(f"id -u {u} >/dev/null 2>&1"):
-                run(f'echo "{u}:{SSH_PASSWORD.strip()}" | chpasswd 2>&1 || true')
+                set_password(u, SSH_PASSWORD.strip())
                 print(f"SSH password set for {u}", flush=True)
             else:
-                print(f"User {u} not found, skipping chpasswd", flush=True)
+                print(f"User {u} not found, skipping set_password", flush=True)
     else:
-        # fallback: use OpenChamber UI password for SSH too
+        # No explicit SSH password: reuse the UI password ONLY when it is a real one.
         if PASSWORD and PASSWORD != "changeme":
             os.environ["SSH_PASSWORD"] = PASSWORD
             ssh_user = os.getenv("USER") or "root"
             for u in list({ssh_user, "root"}):
                 if run(f"id -u {u} >/dev/null 2>&1"):
-                    run(f'echo "{u}:{PASSWORD}" | chpasswd 2>&1 || true')
+                    set_password(u, PASSWORD)
                     print(f"SSH password set for {u} (from OPENCHAMBER_UI_PASSWORD)", flush=True)
         else:
-            print("SSH_PASSWORD not set - SSH will use existing host password/keys", flush=True)
+            print("No SSH password provided (and UI password is default) - NOT setting a known root password; SSH relies on existing host password/keys", flush=True)
 
     # Install & start sshd so the cloudflared ssh ingress (ssh://localhost:22) has a server.
     # The password above is useless without an actual SSH daemon running.
@@ -288,7 +559,9 @@ def main():
         # Allow root password login (we set a root password above specifically for SSH access)
         dropin = "/etc/ssh/sshd_config.d/99-cloudflare-ssh.conf"
         with open(dropin, "w") as f:
-            f.write("PermitRootLogin yes\nPasswordAuthentication yes\n")
+            # Only enable root password auth if we actually set a real (non-default) password.
+            pw_auth = "yes" if (SSH_PASSWORD and SSH_PASSWORD.strip()) else "no"
+            f.write(f"PermitRootLogin yes\nPasswordAuthentication {pw_auth}\n")
         run("/usr/sbin/sshd -t && echo sshd_config OK")  # validate before (re)start
         run("pkill -x sshd 2>/dev/null || true")
         time.sleep(1)
@@ -308,7 +581,7 @@ def main():
                 if prov in j.get("provider", {}):
                     m = j["provider"][prov].setdefault("models", {})
                     if MODEL not in m:
-                        m[MODEL] = {"name": MODEL, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                        m[MODEL] = {"name": MODEL, "tool_call": True, "reasoning": True, "limit": {"context": 190000, "output": 32768}}
                         print(f"Added {MODEL} to opencode.json provider {prov}", flush=True)
             open(p, "w").write(json.dumps(j, indent=2))
     except Exception as e:
@@ -325,6 +598,7 @@ def main():
                 os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
     ensure_tool("lms", "curl -fsSL https://lmstudio.ai/install.sh | bash; export PATH=\"$HOME/.lmstudio/bin:$PATH\"; lms daemon up || true")
     ensure_tool("cloudflared", "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && mv /tmp/cloudflared /usr/local/bin/cloudflared || true")
+    ensure_tool("gh", "curl -fsSL https://cli.github.com/install.sh | bash || true")
     # opencode: npm -g is main, script as fallback (as you requested)
     ensure_tool("opencode", "npm install -g opencode-ai || bun install -g opencode-ai || curl -fsSL https://opencode.ai/install | bash || true; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:$PATH\"")
     # openchamber needs Node 22+ - ensure Node 22 is active before install (use nodesource for Kaggle)
@@ -346,7 +620,14 @@ def main():
                     os.environ["PATH"] = f"{p}:{os.environ['PATH']}"
         run("node --version; npm --version || true")
         # now install openchamber with Node 22 in PATH
-        run("bash -c 'export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env 2>/dev/null)\" || true; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 2>/dev/null || true; node --version; curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash' || curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/main/scripts/install.sh | bash")
+        run("bash -c 'export PATH=\"$HOME/.local/share/fnm:$PATH\"; eval \"$(fnm env 2>/dev/null)\" || true; export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 2>/dev/null || true; node --version; curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/v1.20.0/scripts/install.sh | bash' || curl -fsSL https://raw.githubusercontent.com/openchamber/openchamber/v1.20.0/scripts/install.sh | bash")
+
+    # opencode-synced: authenticate git/gh, then PULL synced config at session start
+    try:
+        if setup_git_auth():
+            sync_pull()
+    except Exception as e:
+        print(f"[sync] init skipped: {e}", flush=True)
 
     # 1. Pull model (LM Studio) - try HF repo, fallback to alias
     if shutil.which("lms"):
@@ -396,8 +677,11 @@ def main():
                         # CUDA OOM root cause: GGUF metadata default ctx can be 262k -> KV cache 25GB+
                         # Force explicit safe contexts first (dual T4 = ~30GB usable total)
                         loaded = False
-                        # 64K OOMs on dual T4 (unable to allocate CUDA0 buffer); 48K is the safe ceiling.
-                        for ctx in ["--context-length 49152", "--context-length 32768", "--context-length 16384", ""]:
+                        # Primary target is 190k (matches opencode.json advertised limit); fall back to
+                        # smaller contexts only if the load OOMs. If lms can't fit 190k on dual T4 (it
+                        # can't split across GPUs), it OOMs -> LMS_LOAD_FAILED=1 -> llama-runner path
+                        # (which does proper multi-GPU split and serves the same 190k context).
+                        for ctx in ["--context-length 190000", "--context-length 49152", "--context-length 32768", "--context-length 16384", ""]:
                             suffix = f" (ctx{ctx.split()[-1]})" if ctx else " (model default - last resort)"
                             if run(f'lms load "{key}" -y --gpu max {ctx}'):
                                 loaded = True
@@ -407,7 +691,7 @@ def main():
                             # llmster headless often fails multi-GPU split (bug tracker #1360/#1365:
                             # "tensor split 0 -> disabling GPU", or all weights on CUDA0 -> OOM)
                             os.environ["LMS_LOAD_FAILED"] = "1"
-                            print("All lms load attempts OOMed - will fall back to Ollama engine (proper multi-GPU split)", flush=True)
+                            print("All lms load attempts OOMed - will fall back to llama-runner engine (proper multi-GPU split)", flush=True)
                     else:
                         g0 = max(ggufs, key=os.path.getsize)
                         print(f"Key not found via lms ls; relying on JIT auto-load of {os.path.basename(g0)}", flush=True)
@@ -481,7 +765,7 @@ def main():
                 "model_path": gguf,
                 "llama_cpp_runtime": "default",
                 "parameters": {
-                    "ctx_size": 49152,
+                    "ctx_size": 190000,
                     "gpu_layers": 99,
                     "flash-attn": True,
                     "cache-type-k": "q8_0",
@@ -492,7 +776,7 @@ def main():
             }},
         }
         open(os.path.join(cfg_dir, "config.json"), "w").write(json.dumps(cfg, indent=2))
-        print(f"Wrote {cfg_dir}/config.json (alias={alias}, ctx=49152, fa=on, kv=q8_0)", flush=True)
+        print(f"Wrote {cfg_dir}/config.json (alias={alias}, ctx=190000, fa=on, kv=q8_0)", flush=True)
         run("fuser -k 1234/tcp 2>/dev/null || true")
         time.sleep(1)
         import json as _json
@@ -505,7 +789,7 @@ def main():
                 for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                     m = j["provider"][prov].setdefault("models", {})
                     m.clear()
-                    m[alias] = {"name": alias, "tool_call": True, "limit": {"context": 49152, "output": 32768}}
+                    m[alias] = {"name": alias, "tool_call": True, "limit": {"context": 190000, "output": 32768}}
                 open(pj, "w").write(_json.dumps(j, indent=2))
             except Exception:
                 pass
@@ -544,7 +828,7 @@ def main():
                     for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                         m = j["provider"][prov].setdefault("models", {})
                         m.clear()
-                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 190000, "output": 32768}}
                     open(pj, "w").write(_json.dumps(j, indent=2))
                     served_model = _served
                     print(f"Patched opencode.json model id -> {_served}", flush=True)
@@ -567,7 +851,11 @@ def main():
     try:
         import json as _json, shutil as _shutil
         src = os.path.join(os.path.dirname(__file__), "..", "opencode.json")
-        if os.path.exists(src):
+        dst_dir = os.path.expanduser("~/.config/opencode")
+        dst = os.path.join(dst_dir, "opencode.jsonc")
+        if os.path.exists(dst):
+            print("opencode config already present (synced) - skipping host seed copy", flush=True)
+        elif os.path.exists(src):
             cfg = _json.load(open(src))
             # point the tunneled provider at the real domain (config ships with a placeholder)
             if "lmstudio-tunneled" in cfg.get("provider", {}):
@@ -582,7 +870,7 @@ def main():
                     for prov in ["lmstudio-local", "lmstudio-tunneled"]:
                         m = cfg["provider"][prov].setdefault("models", {})
                         m.clear()
-                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 49152, "output": 32768}}
+                        m[_served] = {"name": _served, "tool_call": True, "reasoning": True, "limit": {"context": 190000, "output": 32768}}
                     print(f"opencode model id corrected -> {_served}", flush=True)
                     served_model = _served
                     # local chat model available -> prefer it as default over free zen fallback
@@ -593,11 +881,11 @@ def main():
             # even when LM Studio is still downloading / embedding-only.
             if not cfg.get("model"):
                 cfg["model"] = "opencode/big-pickle"
-            dst_dir = os.path.expanduser("~/.config/opencode")
             os.makedirs(dst_dir, exist_ok=True)
-            dst = os.path.join(dst_dir, "opencode.jsonc")
             _json.dump(cfg, open(dst, "w"), indent=2)
             print(f"Copied opencode config -> {dst} (tunneled baseURL https://ai.{DOMAIN}/v1)", flush=True)
+        # Enable opencode-synced plugin + write its config (no-op unless SYNC_REPO set)
+        ensure_plugin_sync()
     except Exception as e:
         print(f"opencode config copy skipped: {e}", flush=True)
 
@@ -623,7 +911,13 @@ def main():
         # If already listening, reuse ONLY if current password works (stale instance with
         # old OPENCODE_SERVER_PASSWORD would 401 the new password -> kill and restart).
         def _pw_ok(port):
-            chk = subprocess.run(f"curl -s -m 4 -o /dev/null -w '%{{http_code}}' -u 'opencode:{PASSWORD}' http://localhost:{port}/", shell=True, capture_output=True, text=True)
+            # Pass credentials as a discrete argv element (no shell) so passwords
+            # containing quotes/shell metacharacters can't break or inject.
+            chk = subprocess.run(
+                ["curl", "-s", "-m", "4", "-o", "/dev/null", "-w", "%{http_code}",
+                 "-u", f"opencode:{PASSWORD}", f"http://localhost:{port}/"],
+                capture_output=True, text=True,
+            )
             return chk.stdout.strip() == "200"
         reused = False
         if wait_http("http://localhost:2456", tries=2, name="Opencode :2456 (existing)"):
@@ -658,7 +952,7 @@ def main():
     # In token mode, credentials-file is ignored; in cert mode try to find real file
     cred_path = os.path.expanduser(f"~/.cloudflared/{TUNNEL}.json")
     real_cred = None
-    for cand in [cred_path, os.path.expanduser(f"~/.cloudflared/{TUNNEL}.json"), f"/root/.cloudflared/{TUNNEL}.json"]:
+    for cand in [cred_path, f"/root/.cloudflared/{TUNNEL}.json"]:
         if _Path(cand).exists():
             real_cred = cand
             break
@@ -716,7 +1010,7 @@ ingress:
                 # dedupe on the full token (truncated strings never matched -> double API call)
                 if cand and cand not in tried:
                     tried.append(cand)
-                    print(f"Trying CF API with token {cand[:12]}...", flush=True)
+                    print("Trying CF API with provided token...", flush=True)
                     jwt = cf_api_named_tunnel(cand, DOMAIN, TUNNEL)
                     if jwt:
                         break
@@ -754,7 +1048,7 @@ ingress:
     print(f"  Model (HF)     : {MODEL}")
     print(f"  Quant          : {MODEL_QUANT}  (override via MODEL_QUANT)")
     print(f"  Model (served) : {model_line}")
-    print(f"  Context / Out  : 48K / 32K tokens  (64K OOMs on dual T4)")
+    print(f"  Context / Out  : 190K / 32K tokens  (int8/q8_0 KV; verified fits dual T4)")
     print("-" * 64)
     print("  CONNECT")
     print(f"   OpenCode Web  : https://oc.{DOMAIN}   (user: opencode  password: {ui_pw})")
@@ -768,13 +1062,34 @@ ingress:
     print(bar + "\n")
 
     print("All services started. Keepalive monitor running (checks every 30s)... Ctrl+C to stop.", flush=True)
+
+    # OpenCode config autosave: SIGKILL (e.g. Kaggle Restart / session expiry) cannot be
+    # caught by any signal/atexit handler, so we push periodically while running. A hard
+    # kill then loses at most the last SYNC_INTERVAL seconds of changes (default 300).
+    if sync_repo_name():
+        _sync_interval = int(os.environ.get("SYNC_INTERVAL", "300") or "300")
+        _sync_stop = threading.Event()
+        def _autosave():
+            while not _sync_stop.wait(_sync_interval):
+                try:
+                    sync_push()
+                except Exception:
+                    pass
+        threading.Thread(target=_autosave, name="opencode-sync-autosave", daemon=True).start()
+        print(f"[sync] autosave every {_sync_interval}s (set SYNC_INTERVAL to change; hard-kill resilient)", flush=True)
+
+    # Engine-aware restart command for :1234 (llama-runner when GGUF_PATH is set, else LM Studio)
+    engine_is_llama = bool(os.environ.get("GGUF_PATH"))
+    restart_1234 = ("cd /tmp/llama-runner && python main.py --headless"
+                    if engine_is_llama else "lms server start --port 1234 --cors")
     SERVICES = [
-        ("LM Studio :1234", "http://localhost:1234/v1/models", "lms server start --port 1234 --cors", 1234),
+        ("LM Studio :1234", "http://localhost:1234/v1/models", restart_1234, 1234),
         ("Opencode :2456", "http://localhost:2456", "opencode web --port 2456 --hostname 0.0.0.0", 2456),
         ("OpenChamber :3000", "http://localhost:3000", 'openchamber --ui-password "$OPENCHAMBER_UI_PASSWORD"', 3000),
     ]
     last = {}
     down_count = {}
+    _last_restart = {}
     tick = 0
     try:
         while True:
@@ -794,34 +1109,43 @@ ingress:
                     print(f"[{time.strftime('%H:%M:%S')}] {nm}: {tag} (http {c})", flush=True)
                 last[nm] = ok
                 status.append(f"{nm.split(' :')[1].strip(':')}={'OK' if ok else 'DOWN'}")
-                # auto-restart service after 2 consecutive DOWNs - verify port holder first to avoid killing tunnel origin unnecessarily
+                # auto-restart service after 2 consecutive DOWNs.
+                # port free -> service crashed -> restart. port held by the expected
+                # process -> either still starting (grace) or hung (after grace) -> kill+restart.
+                # port held by something else -> kill+restart to reclaim it.
                 if not ok:
                     down_count[nm] = down_count.get(nm, 0) + 1
                     if down_count[nm] >= 2:
-                        # Check who holds the port before killing
-                        holder = subprocess.run(f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '", shell=True, capture_output=True, text=True).stdout
-                        # Only kill if not the expected service (prevents tunnel 502 blip when service is already restarting)
-                        expected_map = {2456: ("opencode",), 3000: ("node", "openchamber"), 1234: ("lmstudio", "llmster")}
+                        holder = subprocess.run(
+                            f"ss -tlnp 2>/dev/null | grep ':{port} ' || netstat -tlnp 2>/dev/null | grep ':{port} '",
+                            shell=True, capture_output=True, text=True).stdout
+                        expected_map = {2456: ("opencode",), 3000: ("node", "openchamber"),
+                                        1234: ("lmstudio", "llmster", "python", "llama-server")}
                         expected = expected_map.get(port, ())
-                        if holder and expected and any(e in holder for e in expected):
-                            print(f"{nm} DOWN x{down_count[nm]} but port {port} still held by {expected}, not killing", flush=True)
+                        held_by_expected = bool(holder) and expected and any(e in holder for e in expected)
+                        since_restart = time.time() - _last_restart.get(port, 0)
+                        if held_by_expected and since_restart < 120:
+                            # still within startup grace (e.g. large model loading) - wait
+                            print(f"{nm} DOWN x{down_count[nm]} but {expected} still starting (grace {int(since_restart)}s) - waiting", flush=True)
                         else:
-                            print(f"{nm} DOWN x{down_count[nm]} -> restarting... (holder: {holder.strip()[:80] or 'none'})", flush=True)
+                            print(f"{nm} DOWN x{down_count[nm]} -> restarting (holder: {holder.strip()[:80] or 'none'})", flush=True)
                             run(f"fuser -k {port}/tcp 2>/dev/null || true")
                             time.sleep(1)
                             run_bg(cmd, f"{nm.split(' :')[1].strip(':')}-restart")
+                            _last_restart[port] = time.time()
                         down_count[nm] = 0
                 else:
                     down_count[nm] = 0
             # restart dead tunnels
             for i, p in enumerate(tunnels):
                 if p.poll() is not None:
-                    print(f"TUNNEL DIED: {p.args} code={p.returncode} -> restarting...", flush=True)
+                    print(f"TUNNEL DIED: {_redact(str(p.args))} code={p.returncode} -> restarting...", flush=True)
                     tunnels[i] = run_bg(p.args, f"cloudflared-restart-{i}")
             if tick % 6 == 0:
                 print(f"[{time.strftime('%H:%M:%S')}] keepalive #{tick}: {' '.join(status)} | listening: {len(listeners)} ports", flush=True)
     except KeyboardInterrupt:
         print("Stopping...", flush=True)
+        sync_push()
         for p in tunnels:
             p.terminate()
 

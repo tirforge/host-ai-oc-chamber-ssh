@@ -26,7 +26,7 @@ def test_opencode_wiring():
         m = j["provider"][prov]["models"]["qwen3-coder-30b-a3b-instruct"]
         assert m["tool_call"] is True
         assert m["reasoning"] is True
-        assert m["limit"]["context"] == 49152
+        assert m["limit"]["context"] == 190000
         assert m["limit"]["output"] == 32768
 
 

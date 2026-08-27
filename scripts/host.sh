@@ -18,16 +18,16 @@ if [ -n "${SSH_PASSWORD:-}" ]; then
   _ssh_user="${USER:-root}"
   for _u in "$_ssh_user" root; do
     if id -u "$_u" >/dev/null 2>&1; then
-      echo "$_u:$SSH_PASSWORD" | chpasswd 2>&1 || true
+      chpasswd <<< "$_u:$SSH_PASSWORD" 2>&1 || true
       echo "SSH password set for $_u"
     fi
   done
 elif [ -n "${SSH_PASS:-}" ]; then
   echo "Configuring SSH password from SSH_PASS..."
-  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then echo "$_u:$SSH_PASS" | chpasswd 2>&1 || true; echo "SSH password set for $_u"; fi; done
+  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then chpasswd <<< "$_u:$SSH_PASS" 2>&1 || true; echo "SSH password set for $_u"; fi; done
 elif [ -n "${OPENCHAMBER_UI_PASSWORD:-}" ] && [ "${OPENCHAMBER_UI_PASSWORD}" != "changeme" ]; then
   echo "Using OPENCHAMBER_UI_PASSWORD for SSH..."
-  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then echo "$_u:$OPENCHAMBER_UI_PASSWORD" | chpasswd 2>&1 || true; echo "SSH password set for $_u (from OPENCHAMBER_UI_PASSWORD)"; fi; done
+  for _u in "${USER:-root}" root; do if id -u "$_u" >/dev/null 2>&1; then chpasswd <<< "$_u:$OPENCHAMBER_UI_PASSWORD" 2>&1 || true; echo "SSH password set for $_u (from OPENCHAMBER_UI_PASSWORD)"; fi; done
 fi
 # Map old alias to valid HF repo
 if [ "$MODEL" = "qwen/qwen3-coder-30b-a3b" ] || [ "$MODEL" = "qwen3-coder-30b-a3b" ]; then

@@ -29,7 +29,16 @@
           "tool_call": true,
           "reasoning": true,
           "limit": {
-            "context": 49152,
+            "context": 190000,
+            "output": 32768
+          }
+        },
+        "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF": {
+          "name": "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": {
+            "context": 190000,
             "output": 32768
           }
         }
@@ -48,7 +57,16 @@
           "tool_call": true,
           "reasoning": true,
           "limit": {
-            "context": 49152,
+            "context": 190000,
+            "output": 32768
+          }
+        },
+        "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF": {
+          "name": "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": {
+            "context": 190000,
             "output": 32768
           }
         }
@@ -56,6 +74,9 @@
     },
     "opencode": {
       "name": "OpenCode Zen (free)",
+      "options": {
+        "apiKey": "{env:ZEN_API_KEY}"
+      },
       "models": {
         "big-pickle": {
           "tool_call": true
@@ -76,6 +97,24 @@
           "tool_call": true
         },
         "x-preview-f-free": {
+          "tool_call": true
+        },
+        "deepseek-v4-flash-free": {
+          "tool_call": true
+        },
+        "ling-3.0-flash-free": {
+          "tool_call": true
+        },
+        "ling-3.0-tiny-free": {
+          "tool_call": true
+        },
+        "north-mini-code-free": {
+          "tool_call": true
+        },
+        "laguna-s-2.1-free": {
+          "tool_call": true
+        },
+        "longcat-2.0-free": {
           "tool_call": true
         }
       }
