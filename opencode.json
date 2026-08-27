@@ -29,7 +29,7 @@
           "tool_call": true,
           "reasoning": true,
           "limit": {
-            "context": 49152,
+            "context": 190000,
             "output": 32768
           }
         },
@@ -38,7 +38,7 @@
           "tool_call": true,
           "reasoning": true,
           "limit": {
-            "context": 49152,
+            "context": 190000,
             "output": 32768
           }
         }
@@ -57,7 +57,7 @@
           "tool_call": true,
           "reasoning": true,
           "limit": {
-            "context": 49152,
+            "context": 190000,
             "output": 32768
           }
         },
@@ -66,7 +66,7 @@
           "tool_call": true,
           "reasoning": true,
           "limit": {
-            "context": 49152,
+            "context": 190000,
             "output": 32768
           }
         }

@@ -3,13 +3,13 @@
   "target_model": "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF",
   "quantization": "Q4_K_M (~18GB) fits 32GB with 12-14GB KV headroom; Q6_K (~22GB) for max quality still >50 tok/s active",
   "lmstudio": {
-    "context_length": 32768,
+    "context_length": 190000,
     "gpu_offload": "max",
     "flash_attention": true,
     "mtp": "--spec-type draft-mtp (MTP draft head, 2x speed)",
     "jinja": true,
     "parallel": 1,
-    "notes": "LM Studio auto-splits layers across both T4s via CUDA_VISIBLE_DEVICES=0,1. Keep ctx 32k, not 262k, or KV OOMs."
+    "notes": "LM Studio auto-splits layers across both T4s via CUDA_VISIBLE_DEVICES=0,1. int8/q8_0 KV; verified fits dual T4 at 190k context."
   },
   "cloudflared": {
     "tunnel": "t4host",
