@@ -27,6 +27,7 @@ import time
 import re
 import json
 import shutil
+import shlex
 import threading
 
 # Load a local .env (gitignored) if present - convenient for non-Kaggle/dev runs.
@@ -100,11 +101,22 @@ def run(cmd):
 def set_password(user, pw):
     # Set a user's password via chpasswd stdin so the secret never appears in `ps`
     # (avoids `echo "user:pass" | chpasswd`, where the password is visible as argv).
+    # Reject ':' and '\n' which are chpasswd delimiters (would create extra entries).
+    if ":" in pw or "\n" in pw or "\r" in pw:
+        print(f"Password for {user} contains ':' or newline - rejected (chpasswd delimiter)", flush=True)
+        return False
+    if ":" in user or "\n" in user or "\r" in user:
+        print(f"Username {user!r} contains invalid characters - rejected", flush=True)
+        return False
     try:
         binp = shutil.which("chpasswd") or "/usr/sbin/chpasswd"
-        subprocess.run([binp], input=f"{user}:{pw}\n".encode(), capture_output=True, check=False)
+        r = subprocess.run([binp], input=f"{user}:{pw}\n".encode(), capture_output=True, check=False)
+        if r.returncode != 0:
+            print(f"chpasswd failed for {user}: {r.stderr.decode(errors='ignore')[:200]}", flush=True)
+            return False
         return True
-    except Exception:
+    except Exception as e:
+        print(f"set_password error for {user}: {e}", flush=True)
         return False
 
 def _redact(s):
@@ -560,7 +572,9 @@ def main():
         dropin = "/etc/ssh/sshd_config.d/99-cloudflare-ssh.conf"
         with open(dropin, "w") as f:
             # Only enable root password auth if we actually set a real (non-default) password.
-            pw_auth = "yes" if (SSH_PASSWORD and SSH_PASSWORD.strip()) else "no"
+            # Use effective password (env var updated by fallback branch) not stale local.
+            effective_pw = os.getenv("SSH_PASSWORD") or ""
+            pw_auth = "yes" if effective_pw.strip() else "no"
             f.write(f"PermitRootLogin yes\nPasswordAuthentication {pw_auth}\n")
         run("/usr/sbin/sshd -t && echo sshd_config OK")  # validate before (re)start
         run("pkill -x sshd 2>/dev/null || true")
@@ -644,20 +658,26 @@ def main():
         # HF Spaces are pulled directly via huggingface_hub with --repo-type space
         rt_flag = "--repo-type space " if MODEL_REPO_TYPE == "space" else ""
         # try base repo id first, then full, then direct HuggingFace download into LM Studio models dir (auto-discovered)
-        if not run(f'lms get "{base}" -y'):
-            if not run(f'lms get "{base}"'):
+        # Use shlex.quote to prevent shell injection via MODEL (user-supplied)
+        qbase = shlex.quote(base)
+        if not run(f'lms get {qbase} -y'):
+            if not run(f'lms get {qbase}'):
                 print("lms get failed -> direct HF download into ~/.lmstudio/models ...", flush=True)
                 # Quantized GGUF is the norm; allow overriding via MODEL_QUANT (default Q4_K_M).
                 quant = MODEL_QUANT
                 dest = os.path.expanduser(f"~/.lmstudio/models/{base}")
                 os.makedirs(dest, exist_ok=True)
-                run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" {rt_flag}--include "*{quant}*" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" {rt_flag}--include "*{quant}*" --local-dir "{dest}" </dev/null) || true')
+                qquant = shlex.quote(quant)
+                qdest = shlex.quote(dest)
+                qrt = rt_flag.strip()
+                qrt_flag = f"{shlex.quote(qrt)} " if qrt else ""
+                run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download {qbase} {qrt_flag}--include "*{qquant}*" --local-dir {qdest} </dev/null || huggingface-cli download {qbase} {qrt_flag}--include "*{qquant}*" --local-dir {qdest} </dev/null) || true')
                 import glob as _g
                 ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
                 if not ggufs and quant:
                     # quant filter matched nothing (repo ships a different quant) -> grab all GGUFs
                     print(f"quant '*{quant}*' not found in {base}, downloading all GGUF files", flush=True)
-                    run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download "{base}" {rt_flag}--include "*.gguf" --local-dir "{dest}" </dev/null || huggingface-cli download "{base}" {rt_flag}--include "*.gguf" --local-dir "{dest}" </dev/null) || true')
+                    run(f'pip install -q -U "huggingface_hub[cli]" >/dev/null 2>&1 || true; (hf download {qbase} {qrt_flag}--include "*.gguf" --local-dir {qdest} </dev/null || huggingface-cli download {qbase} {qrt_flag}--include "*.gguf" --local-dir {qdest} </dev/null) || true')
                     ggufs = _g.glob(os.path.join(dest, "**", "*.gguf"), recursive=True) or _g.glob(os.path.join(dest, "*.gguf"))
                 if ggufs:
                     print(f"Downloaded {len(ggufs)} GGUF file(s) -> {dest}", flush=True)
@@ -1039,7 +1059,8 @@ ingress:
 
     # ---- Clean connection summary (printed in Python) ----
     ui_pw = PASSWORD if PASSWORD != "changeme" else "(unset - set OPENCHAMBER_UI_PASSWORD)"
-    ssh_pw = SSH_PASSWORD if (SSH_PASSWORD and SSH_PASSWORD.strip()) else ui_pw
+    ssh_pw = (os.getenv("SSH_PASSWORD") or SSH_PASSWORD or "")
+    ssh_pw = ssh_pw if ssh_pw.strip() else ui_pw
     model_line = served_model or MODEL
     bar = "=" * 64
     print("\n" + bar)
